@@ -1,3 +1,4 @@
+#include <linux/ip.h>
 #include <linux/wait.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -6,6 +7,7 @@
 #include <linux/netfilter.h>
 #include <linux/netfilter_ipv4.h>
 
+#include <net/ip.h>
 #include <net/sock.h>
 
 #include "hook.h"
@@ -15,44 +17,55 @@ static int cn_test_timer_counter = 0;
 
 static void hk_packet_cn_callback(void *data)
 {
+	struct cn_msg *m = data;
+	struct sk_buff *skb;
+	skb = alloc_skb(NET_SKB_PAD + m->len, gfp_any());
+	if (!skb) {
+		printk("Cannot allocated NET_SKB_PAD + m->len: %d bytes\n", NET_SKB_PAD + m->len);
+		return;
+	}
+
+	skb_reserve(skb, NET_SKB_PAD);
+	skb_pull(skb, m->len);
+	memcpy(skb->data, m->data, m->len);
+	printk("xmited packet\n");
+	ip_queue_xmit(skb, 1);
 	return;
 }
-static int hk_packet_dispatch(void *unused)
+
+static int hk_packet_dispatch(struct sk_buff *skb)
 {
-    struct cn_msg *m;
-    char data[64];
-    int ret;
+	struct cn_msg *m;
+	void *data;
+	int len;
+	int ret = 0;
 
-    ret = cn_add_callback(&cn_test_id, "cn_test", hk_packet_cn_callback);
-    if (ret)
-	    return ret;
+	data = skb->data;
+	len = skb->len;
 
-    while (!kthread_should_stop()) {
-	    m = kzalloc(sizeof(*m) + sizeof(data), GFP_ATOMIC);
-	    if (!m)
-		    goto out;
+	m = kzalloc(sizeof(*m) + len, GFP_ATOMIC);
+	if (!m) {
+		printk("cannot allocate %d bytes\n", len + sizeof(*m));
+		ret = -ENOMEM;
+		goto out;
+	}
 
-	    memcpy(&m->id, &cn_test_id, sizeof(m->id));
-	    m->seq = cn_test_timer_counter;
-	    m->len = sizeof(data);
-	    m->len = scnprintf(data, sizeof(data), "counter = %u", cn_test_timer_counter) + 1;
+	memcpy(&m->id, &cn_test_id, sizeof(m->id));
+	m->seq = cn_test_timer_counter;
+	m->len = len;
 
-	    cn_test_timer_counter++;
+	cn_test_timer_counter++;
 
-	    memcpy(m + 1, data, m->len);
+	memcpy(m->data, data, m->len);
 
-	    ret = cn_netlink_send(m, 0, gfp_any());
-	    if (ret < 0)
-		    printk("ret is %d\n", ret);
+	ret = cn_netlink_send(m, 0, gfp_any());
+	//if (ret < 0)
+	//printk("ret is %d\n", ret);
 
-	    kfree(m);
-	    mdelay(1000);
-    }
+	kfree(m);
 
 out:
-    cn_del_callback(&cn_test_id);
-
-    return 0;
+	return ret;
 }
 
 static unsigned int
@@ -60,16 +73,27 @@ pep_in(unsigned int hooknum, struct sk_buff **pskb,
 	 const struct net_device *in, const struct net_device *out,
 	 int (*okfn)(struct sk_buff *))
 {
-	//printk("%s()\n", __FUNCTION__);
-	return NF_ACCEPT;
+	int ret = NF_ACCEPT;
+
+	//ret = hk_packet_dispatch(*pskb);
+	//printk("%s(): %d\n", __FUNCTION__, ret);
+	return ret;
 }
+
+static unsigned int test_ip = htonl(0xd41b300a); /* 212.27.48.10 */
 
 static unsigned int
 pep_out(unsigned int hooknum, struct sk_buff **pskb,
 	 const struct net_device *in, const struct net_device *out,
 	 int (*okfn)(struct sk_buff *))
 {
-	//printk("%s()\n", __FUNCTION__);
+	int ret;
+	struct iphdr *iph = (struct iphdr *)skb_network_header(*pskb);
+
+	if (iph->daddr == test_ip || iph->saddr == test_ip) {
+		ret = hk_packet_dispatch(*pskb);
+		return NF_STOLEN;
+	}
 	return NF_ACCEPT;
 }
 
@@ -89,8 +113,6 @@ static struct nf_hook_ops pep_out_hook = {
 	.priority       = NF_IP_PRI_FIRST,
 };
 
-static struct task_struct *hk_task;
-
 static int init(void)
 {
 	int ret;
@@ -107,14 +129,15 @@ static int init(void)
 		goto err2;
 	}
 
-	hk_task = kthread_run(hk_packet_dispatch, NULL, "khk_task");
-	if (IS_ERR(hk_task)) {
-		ret = PTR_ERR(hk_task);
-		printk("Could not lauch hkh_task\n");
-		goto err_thread;
+	ret = cn_add_callback(&cn_test_id, "cn_test", hk_packet_cn_callback);
+	if (ret) {
+		printk("can't register cn callback.\n");
+		goto err_cn;
 	}
+
 	return 0;
-err_thread:
+
+err_cn:
 	nf_unregister_hook(&pep_out_hook);
 err2:
 	nf_unregister_hook(&pep_in_hook);
@@ -124,8 +147,7 @@ err1:
 
 static void exit(void)
 {
-	if (hk_task)
-		kthread_stop(hk_task);
+	cn_del_callback(&cn_test_id);
 	nf_unregister_hook(&pep_in_hook);
 	nf_unregister_hook(&pep_out_hook);
 }

@@ -10,10 +10,10 @@ else
 KDIR	?= /lib/modules/$(shell uname -r)/build
 PWD	:= $(shell pwd)
 
-all:
+all: user
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
 
 endif
 
-user:
+user: user.c
 	gcc -Wall -o user user.c

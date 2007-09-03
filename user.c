@@ -1,55 +1,84 @@
-#include <string.h>
-#include <stdio.h>
 #include <sys/socket.h>
-#include <sys/types.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <unistd.h>
+#include <stdio.h>
+#include <string.h>
 #include <stdlib.h>
-#include <linux/netlink.h>
-#define MAX_PAYLOAD 1024  /* maximum payload size*/
-struct sockaddr_nl src_addr, dest_addr;
-struct nlmsghdr *nlh = NULL;
-struct msghdr msg;
-struct iovec iov;
-int sock_fd;
-#define NETLINK_TEST 17
-int main(void)
-{
-	sock_fd = socket(PF_NETLINK, SOCK_RAW,NETLINK_TEST);
-	memset(&src_addr, 0, sizeof(src_addr));
-	src_addr.nl_family = AF_NETLINK;
-	src_addr.nl_pid = getpid();  /* self pid */
-	src_addr.nl_groups = 0;  /* not in mcast groups */
-	bind(sock_fd, (struct sockaddr*)&src_addr,
-			sizeof(src_addr));
-#if 0
-	memset(&dest_addr, 0, sizeof(dest_addr));
-	dest_addr.nl_family = AF_NETLINK;
-	dest_addr.nl_pid = 0;   /* For Linux Kernel */
-	dest_addr.nl_groups = 0; /* unicast */
-	nlh=(struct nlmsghdr *)malloc(
-			NLMSG_SPACE(MAX_PAYLOAD));
-	/* Fill the netlink message header */
-	nlh->nlmsg_len = NLMSG_SPACE(MAX_PAYLOAD);
-	nlh->nlmsg_pid = getpid();  /* self pid */
-	nlh->nlmsg_flags = 0;
-	/* Fill in the netlink message payload */
-	strcpy(NLMSG_DATA(nlh), "Hello you!");
-	iov.iov_base = (void *)nlh;
-	iov.iov_len = nlh->nlmsg_len;
-	msg.msg_name = (void *)&dest_addr;
-	msg.msg_namelen = sizeof(dest_addr);
-	msg.msg_iov = &iov;
-	msg.msg_iovlen = 1;
-	sendmsg(sock_fd, &msg, 0);
-#endif
-	/* Read message from kernel */
-	memset(nlh, 0, NLMSG_SPACE(MAX_PAYLOAD));
-	recvmsg(sock_fd, &msg, 0);
-	printf(" Received message payload: %s\n",
-			(char *)NLMSG_DATA(nlh));
+#include <errno.h>
 
-	/* Close Netlink Socket */
-	close(sock_fd);
+#include <linux/netlink.h>
+#include <linux/connector.h>
+
+#include "hook.h"
+
+int main(int argc, char **argv)
+{
+	int s;
+	char buf[1024];
+	int len;
+	struct nlmsghdr *reply;
+	struct sockaddr_nl l_local;
+	struct cn_msg *data;
+	FILE *out;
+	time_t tm;
+
+	if (argc < 2)
+		out = stdout;
+	else {
+		out = fopen(argv[1], "a+");
+		if (!out) {
+			fprintf(stderr, "Unable to open %s for writing: %s\n",
+					argv[1], strerror(errno));
+			out = stdout;
+		}
+	}
+
+	memset(buf, 0, sizeof(buf));
+
+	s = socket(PF_NETLINK, SOCK_DGRAM, NETLINK_CONNECTOR);
+	if (s == -1) {
+		perror("socket");
+		return -1;
+	}
+
+	l_local.nl_family = AF_NETLINK;
+	l_local.nl_groups = 1 << (HOOK_ID -1); /* bitmask of requested groups */
+	l_local.nl_pid = 0;
+
+	if (bind(s, (struct sockaddr *)&l_local, sizeof(struct sockaddr_nl)) == -1) {
+		perror("bind");
+		close(s);
+		return -1;
+	}
+
+
+	memset(buf, 0, sizeof(buf));
+	len = recv(s, buf, sizeof(buf), 0);
+	if (len == -1) {
+		perror("recv buf");
+		close(s);
+		return -1;
+	}
+	reply = (struct nlmsghdr *)buf;
+
+	switch (reply->nlmsg_type) {
+		case NLMSG_ERROR:
+			fprintf(out, "Error message received.\n");
+			fflush(out);
+			break;
+		case NLMSG_DONE:
+			data = (struct cn_msg *)NLMSG_DATA(reply);
+
+			time(&tm);
+			fprintf(out, "%.24s : [%x.%x] [%08u.%08u].\n",
+					ctime(&tm), data->id.idx, data->id.val, data->seq, data->ack);
+			fflush(out);
+			break;
+		default:
+			break;
+	}
+
+	close(s);
 	return 0;
 }
-

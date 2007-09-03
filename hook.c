@@ -1,64 +1,66 @@
 #include <linux/wait.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/kthread.h>
+#include <linux/connector.h>
 #include <linux/netfilter.h>
 #include <linux/netfilter_ipv4.h>
 
 #include <net/sock.h>
 
-#define NETLINK_TEST 17
+#include "hook.h"
 
-void nl_data_ready (struct sock *sk, int len)
+static struct cb_id cn_test_id = { .idx = HOOK_ID, .val = HOOK_ID_VAL };
+static int cn_test_timer_counter = 0;
+
+static void hk_packet_cn_callback(void *data)
 {
-  wake_up_interruptible(sk->sk_sleep);
+	return;
+}
+static int hk_packet_dispatch(void *unused)
+{
+    struct cn_msg *m;
+    char data[64];
+    int ret;
+
+    ret = cn_add_callback(&cn_test_id, "cn_test", hk_packet_cn_callback);
+    if (ret)
+	    return ret;
+
+    while (!kthread_should_stop()) {
+	    m = kzalloc(sizeof(*m) + sizeof(data), GFP_ATOMIC);
+	    if (!m)
+		    goto out;
+
+	    memcpy(&m->id, &cn_test_id, sizeof(m->id));
+	    m->seq = cn_test_timer_counter;
+	    m->len = sizeof(data);
+	    m->len = scnprintf(data, sizeof(data), "counter = %u", cn_test_timer_counter) + 1;
+
+	    cn_test_timer_counter++;
+
+	    memcpy(m + 1, data, m->len);
+
+	    ret = cn_netlink_send(m, 0, gfp_any());
+	    if (ret < 0)
+		    printk("ret is %d\n", ret);
+
+	    kfree(m);
+	    mdelay(1000);
+    }
+
+out:
+    cn_del_callback(&cn_test_id);
+
+    return 0;
 }
 
-static struct sock *nl_sk = NULL;
-
-#define STRING "This is a test1"
-int netlink_test(void)
-{
-	struct sk_buff *skb = NULL;
-	struct nlmsghdr *nlh = NULL;
-	int size;
-	void *data;
-
-	nl_sk = netlink_kernel_create(NETLINK_TEST, 0, nl_data_ready, NULL, THIS_MODULE);
-	/* wait for message coming down from user-space */
-#if 0
-	skb = skb_recv_datagram(nl_sk, 0, 0, &err);
-	nlh = (struct nlmsghdr *)skb->data;
-	printk("%s: received netlink message payload:%s\n",
-			__FUNCTION__, (char *)NLMSG_DATA(nlh));
-	//pid = nlh->nlmsg_pid; /*pid of sending process */
-#endif
-	size = NLMSG_SPACE(1024);
-
-	skb = alloc_skb(size, GFP_ATOMIC);
-	if (!skb)
-		return -ENOMEM;
-
-	nlh = NLMSG_PUT(skb, 0, 1, NLMSG_DONE, size - sizeof(*nlh));
-
-	data = NLMSG_DATA(nlh);
-
-	memcpy(data, STRING, strlen(STRING)+1);
-
-
-	NETLINK_CB(skb).dst_group = 0; /* not in mcast group */
-	NETLINK_CB(skb).pid = 0;      /* from kernel */
-	netlink_broadcast(nl_sk, skb, 0, 1, GFP_ATOMIC);
-	sock_release(nl_sk->sk_socket);
-
-nlmsg_failure:
-	return 0;
-}
 static unsigned int
 pep_in(unsigned int hooknum, struct sk_buff **pskb,
 	 const struct net_device *in, const struct net_device *out,
 	 int (*okfn)(struct sk_buff *))
 {
-	printk("%s()\n", __FUNCTION__);
+	//printk("%s()\n", __FUNCTION__);
 	return NF_ACCEPT;
 }
 
@@ -67,7 +69,7 @@ pep_out(unsigned int hooknum, struct sk_buff **pskb,
 	 const struct net_device *in, const struct net_device *out,
 	 int (*okfn)(struct sk_buff *))
 {
-	printk("%s()\n", __FUNCTION__);
+	//printk("%s()\n", __FUNCTION__);
 	return NF_ACCEPT;
 }
 
@@ -87,6 +89,8 @@ static struct nf_hook_ops pep_out_hook = {
 	.priority       = NF_IP_PRI_FIRST,
 };
 
+static struct task_struct *hk_task;
+
 static int init(void)
 {
 	int ret;
@@ -103,8 +107,15 @@ static int init(void)
 		goto err2;
 	}
 
-	netlink_test();
+	hk_task = kthread_run(hk_packet_dispatch, NULL, "khk_task");
+	if (IS_ERR(hk_task)) {
+		ret = PTR_ERR(hk_task);
+		printk("Could not lauch hkh_task\n");
+		goto err_thread;
+	}
 	return 0;
+err_thread:
+	nf_unregister_hook(&pep_out_hook);
 err2:
 	nf_unregister_hook(&pep_in_hook);
 err1:
@@ -113,9 +124,12 @@ err1:
 
 static void exit(void)
 {
+	if (hk_task)
+		kthread_stop(hk_task);
 	nf_unregister_hook(&pep_in_hook);
 	nf_unregister_hook(&pep_out_hook);
 }
 
 module_init(init)
 module_exit(exit)
+MODULE_LICENSE("GPL");

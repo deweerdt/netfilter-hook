@@ -5,6 +5,7 @@
 #include <linux/kthread.h>
 #include <linux/connector.h>
 #include <linux/netfilter.h>
+#include <linux/etherdevice.h>
 #include <linux/netfilter_ipv4.h>
 
 #include <net/ip.h>
@@ -22,6 +23,7 @@ static struct ethhdr pheader = {
 	.h_proto 	= ntohs(ETH_P_IP),
 };
 
+static struct sk_buff *ours = NULL;
 static void hk_packet_cn_callback(void *data)
 {
 	struct cn_msg *m = data;
@@ -29,25 +31,34 @@ static void hk_packet_cn_callback(void *data)
 	int ret;
 
 	m->len -= 56;
-	printk("called back, sending %d\n", ETH_HLEN + m->len);
-	skb = alloc_skb(ETH_HLEN + m->len, gfp_any());
+	printk("called back, sending %d\n", m->len + ETH_HLEN + 5);
+	skb = dev_alloc_skb(ETH_HLEN + m->len + 5);
+	ours = skb;
 	if (!skb) {
-		printk("Cannot allocate NET_SKB_PAD + m->len: %d bytes\n", NET_SKB_PAD + m->len);
+		printk("Cannot allocate NET_SKB_PAD + m->len: %d bytes\n", ETH_HLEN + m->len + 5);
 		return;
 	}
 
-	skb->dev = dev_get_by_name("eth0");
+	//skb->dev = dev_get_by_name("eth0");
+	skb_reserve(skb, 2);
+#if 0
+	if (!skb->dev) {
+		printk("Cannot find dev eth0\n");
+		dev_kfree_skb(skb);
+		return;
+	}
+#endif
 
-	skb_put(skb, ETH_HLEN);
+	skb_put(skb, ETH_HLEN + m->len);
 	memcpy(skb->data, &pheader, ETH_HLEN);
-	skb_pull(skb, ETH_HLEN);
 
-	skb_put(skb, m->len);
-	memcpy(skb->data, m->data, m->len);
-	skb_push(skb, ETH_HLEN);
-	skb->pkt_type = PACKET_OUTGOING;
+         /* copy the data into the sk_buff */
+	memcpy(skb->data + ETH_HLEN, m->data, m->len);
+
+        skb->protocol = eth_type_trans(skb, dev_get_by_name("eth0"));
 	ret = netif_rx(skb);
 	printk("xmited packet, packet_type is %d %d\n", skb->pkt_type, ret);
+
 	return;
 }
 
@@ -91,8 +102,26 @@ out:
 	return ret;
 }
 
+//static unsigned int test_ip = htonl(0xd41b300a); /* 212.27.48.10 */
+static unsigned int test_ip = htonl(0xc0a80101); /* 192.168.1.1 */
+
 static unsigned int
 pep_in(unsigned int hooknum, struct sk_buff **pskb,
+	 const struct net_device *in, const struct net_device *out,
+	 int (*okfn)(struct sk_buff *))
+{
+	int ret;
+	struct iphdr *iph = (struct iphdr *)skb_network_header(*pskb);
+
+	if ((iph->daddr == test_ip || iph->saddr == test_ip) && *pskb != ours) {
+		ret = hk_packet_dispatch(*pskb);
+		return NF_STOLEN;
+	}
+	return NF_ACCEPT;
+}
+
+static unsigned int
+pep_out(unsigned int hooknum, struct sk_buff **pskb,
 	 const struct net_device *in, const struct net_device *out,
 	 int (*okfn)(struct sk_buff *))
 {
@@ -101,24 +130,6 @@ pep_in(unsigned int hooknum, struct sk_buff **pskb,
 	//ret = hk_packet_dispatch(*pskb);
 	//printk("%s(): %d\n", __FUNCTION__, ret);
 	return ret;
-}
-
-//static unsigned int test_ip = htonl(0xd41b300a); /* 212.27.48.10 */
-static unsigned int test_ip = htonl(0xc0a80101); /* 192.168.1.1 */
-
-static unsigned int
-pep_out(unsigned int hooknum, struct sk_buff **pskb,
-	 const struct net_device *in, const struct net_device *out,
-	 int (*okfn)(struct sk_buff *))
-{
-	int ret;
-	struct iphdr *iph = (struct iphdr *)skb_network_header(*pskb);
-
-	if (iph->daddr == test_ip || iph->saddr == test_ip) {
-		ret = hk_packet_dispatch(*pskb);
-		return NF_STOLEN;
-	}
-	return NF_ACCEPT;
 }
 
 static struct nf_hook_ops pep_in_hook = {
@@ -133,7 +144,7 @@ static struct nf_hook_ops pep_out_hook = {
 	.hook		= pep_out,
 	.owner		= THIS_MODULE,
 	.pf		= PF_INET,
-	.hooknum        = NF_IP_PRE_ROUTING,
+	.hooknum        = NF_IP_POST_ROUTING,
 	.priority       = NF_IP_PRI_FIRST,
 };
 

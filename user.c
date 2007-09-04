@@ -115,7 +115,7 @@ static int send_packet(int s, void *buf, int len)
 int main(int argc, char **argv)
 {
 	int s;
-	char buf[1024];
+	char buf[4096];
 	int len;
 	struct nlmsghdr *reply;
 	struct sockaddr_nl l_local;

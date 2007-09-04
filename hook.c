@@ -15,21 +15,39 @@
 static struct cb_id cn_test_id = { .idx = HOOK_ID, .val = HOOK_ID_VAL };
 static int cn_test_timer_counter = 0;
 
+static struct net_device *pdev;
+static struct ethhdr pheader = {
+	.h_source	= { 0x00, 0xff, 0x1e, 0xc2, 0xd8, 0x37 },
+	.h_dest 	= { 0x02, 0x00, 0x00, 0x00, 0x00, 0x00 },
+	.h_proto 	= ntohs(ETH_P_IP),
+};
+
 static void hk_packet_cn_callback(void *data)
 {
 	struct cn_msg *m = data;
 	struct sk_buff *skb;
-	skb = alloc_skb(NET_SKB_PAD + m->len, gfp_any());
+	int ret;
+
+	m->len -= 56;
+	printk("called back, sending %d\n", ETH_HLEN + m->len);
+	skb = alloc_skb(ETH_HLEN + m->len, gfp_any());
 	if (!skb) {
-		printk("Cannot allocated NET_SKB_PAD + m->len: %d bytes\n", NET_SKB_PAD + m->len);
+		printk("Cannot allocate NET_SKB_PAD + m->len: %d bytes\n", NET_SKB_PAD + m->len);
 		return;
 	}
 
-	skb_reserve(skb, NET_SKB_PAD);
-	skb_pull(skb, m->len);
+	skb->dev = dev_get_by_name("eth0");
+
+	skb_put(skb, ETH_HLEN);
+	memcpy(skb->data, &pheader, ETH_HLEN);
+	skb_pull(skb, ETH_HLEN);
+
+	skb_put(skb, m->len);
 	memcpy(skb->data, m->data, m->len);
-	printk("xmited packet\n");
-	ip_queue_xmit(skb, 1);
+	skb_push(skb, ETH_HLEN);
+	skb->pkt_type = PACKET_OUTGOING;
+	ret = netif_rx(skb);
+	printk("xmited packet, packet_type is %d %d\n", skb->pkt_type, ret);
 	return;
 }
 
@@ -39,6 +57,11 @@ static int hk_packet_dispatch(struct sk_buff *skb)
 	void *data;
 	int len;
 	int ret = 0;
+
+	pdev = skb->dev;
+
+	/* get back to the ip header */
+	skb_push(skb, sizeof(struct iphdr));
 
 	data = skb->data;
 	len = skb->len;
@@ -60,7 +83,7 @@ static int hk_packet_dispatch(struct sk_buff *skb)
 
 	ret = cn_netlink_send(m, 0, gfp_any());
 	//if (ret < 0)
-	//printk("ret is %d\n", ret);
+	printk("Sent to user space, ret is %d\n", ret);
 
 	kfree(m);
 
@@ -80,7 +103,8 @@ pep_in(unsigned int hooknum, struct sk_buff **pskb,
 	return ret;
 }
 
-static unsigned int test_ip = htonl(0xd41b300a); /* 212.27.48.10 */
+//static unsigned int test_ip = htonl(0xd41b300a); /* 212.27.48.10 */
+static unsigned int test_ip = htonl(0xc0a80101); /* 192.168.1.1 */
 
 static unsigned int
 pep_out(unsigned int hooknum, struct sk_buff **pskb,

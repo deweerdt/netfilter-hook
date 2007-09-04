@@ -13,6 +13,55 @@
 
 #include "hook.h"
 
+#if 1
+#define pr_debug(x, a...) do { \
+			 	char __buf[4096]; \
+				sprintf(__buf, x, ##a); \
+				fprintf(stderr, "%s", __buf); \
+			  } while(0);
+#else
+#define pr_debug(...) do {} while(0)
+#endif
+
+static void __attribute__((unused)) dump_mem(void *mem, size_t len, size_t size)
+{
+	uint8_t *u8;
+#if 0
+	uint16_t *u16;
+#endif
+	uint32_t *u32;
+	int i;
+	char buf[4096] = "";
+	char buf2[4096] = "";
+
+	switch (size) {
+		case 1:
+			u8 = mem;
+			for (i=0; i <= len / size; i++) {
+				if (!(i%8))
+					pr_debug("%02x ", u8[i]);
+			}
+			break;
+		case 4:
+			u32 = mem;
+			for (i=0; i <= len / size; i++) {
+				buf2[0] = '\0';
+				sprintf(buf2, "%08x ", htonl(u32[i]));
+				strcat(buf, buf2);
+				if (!(i%8)) {
+					pr_debug("%s\n", buf);
+					buf[0] = '\0';
+				}
+			}
+			break;
+		default:
+			pr_debug("Unhandled size %d\n", size);
+	}
+	pr_debug("\n");
+	return;
+}
+
+
 static int seq = 0;
 static int netlink_send(int s, struct cn_msg *msg)
 {
@@ -35,6 +84,7 @@ static int netlink_send(int s, struct cn_msg *msg)
 
 	memcpy(m, msg, sizeof(*m) + msg->len);
 
+	//dump_mem(m->data, m->len, 4);
 	err = send(s, nlh, size, 0);
 	if (err == -1) {
 		fprintf(stderr, "Failed to send: %s [%d].\n", strerror(errno), errno);
@@ -122,9 +172,13 @@ int main(int argc, char **argv)
 				data = (struct cn_msg *)NLMSG_DATA(reply);
 
 				time(&tm);
+				/*
 				fprintf(out, "%.24s : cksum: %x\n",
 						ctime(&tm), ntohs(((uint16_t *)data->data)[5]));
 				fflush(out);
+				*/
+				//dump_mem(data->data, data->len, 4);
+
 				send_packet(s, data->data, len);
 				break;
 			default:

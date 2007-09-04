@@ -13,6 +13,8 @@
 
 #include "hook.h"
 
+#define HOOK_MAGIC 0xcafe1234
+
 static struct cb_id cn_test_id = { .idx = HOOK_ID, .val = HOOK_ID_VAL };
 static int cn_test_timer_counter = 0;
 
@@ -23,7 +25,6 @@ static struct ethhdr pheader = {
 	.h_proto 	= ntohs(ETH_P_IP),
 };
 
-static struct sk_buff *ours = NULL;
 static void hk_packet_cn_callback(void *data)
 {
 	struct cn_msg *m = data;
@@ -33,21 +34,15 @@ static void hk_packet_cn_callback(void *data)
 	m->len -= 56;
 	printk("called back, sending %d\n", m->len + ETH_HLEN + 5);
 	skb = dev_alloc_skb(ETH_HLEN + m->len + 5);
-	ours = skb;
 	if (!skb) {
 		printk("Cannot allocate NET_SKB_PAD + m->len: %d bytes\n", ETH_HLEN + m->len + 5);
 		return;
 	}
 
-	//skb->dev = dev_get_by_name("eth0");
+	skb_reserve(skb, 16);
+	*(unsigned int *)skb->head = HOOK_MAGIC;
+
 	skb_reserve(skb, 2);
-#if 0
-	if (!skb->dev) {
-		printk("Cannot find dev eth0\n");
-		dev_kfree_skb(skb);
-		return;
-	}
-#endif
 
 	skb_put(skb, ETH_HLEN + m->len);
 	memcpy(skb->data, &pheader, ETH_HLEN);
@@ -57,7 +52,7 @@ static void hk_packet_cn_callback(void *data)
 
         skb->protocol = eth_type_trans(skb, dev_get_by_name("eth0"));
 	ret = netif_rx(skb);
-	printk("xmited packet, packet_type is %d %d\n", skb->pkt_type, ret);
+	printk("xmited packet, users are:%d %d\n", atomic_read(&skb->users), ret);
 
 	return;
 }
@@ -113,8 +108,10 @@ pep_in(unsigned int hooknum, struct sk_buff **pskb,
 	int ret;
 	struct iphdr *iph = (struct iphdr *)skb_network_header(*pskb);
 
-	if ((iph->daddr == test_ip || iph->saddr == test_ip) && *pskb != ours) {
+	if ((iph->daddr == test_ip || iph->saddr == test_ip)
+	    && *(unsigned int *)(*pskb)->head != HOOK_MAGIC) {
 		ret = hk_packet_dispatch(*pskb);
+		kfree_skb(*pskb);
 		return NF_STOLEN;
 	}
 	return NF_ACCEPT;

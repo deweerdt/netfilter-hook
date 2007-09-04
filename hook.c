@@ -30,12 +30,14 @@ static void hk_packet_cn_callback(void *data)
 	struct cn_msg *m = data;
 	struct sk_buff *skb;
 	int ret;
+	int size;
 
 	m->len -= 56;
-	printk("called back, sending %d\n", m->len + ETH_HLEN + 5);
-	skb = dev_alloc_skb(ETH_HLEN + m->len + 5);
+	size = m->len + ETH_HLEN + 16 + 2;
+	printk("called back, sending %d\n", size);
+	skb = dev_alloc_skb(size);
 	if (!skb) {
-		printk("Cannot allocate NET_SKB_PAD + m->len: %d bytes\n", ETH_HLEN + m->len + 5);
+		printk("Cannot allocate NET_SKB_PAD + m->len: %d bytes\n", size);
 		return;
 	}
 
@@ -97,8 +99,10 @@ out:
 	return ret;
 }
 
-//static unsigned int test_ip = htonl(0xd41b300a); /* 212.27.48.10 */
+#ifdef TEST_IP
+/* static unsigned int test_ip = htonl(0xd41b300a); */ /* 212.27.48.10 */
 static unsigned int test_ip = htonl(0xc0a80101); /* 192.168.1.1 */
+#endif
 
 static unsigned int
 pep_in(unsigned int hooknum, struct sk_buff **pskb,
@@ -106,10 +110,15 @@ pep_in(unsigned int hooknum, struct sk_buff **pskb,
 	 int (*okfn)(struct sk_buff *))
 {
 	int ret;
+#ifdef TEST_IP
 	struct iphdr *iph = (struct iphdr *)skb_network_header(*pskb);
+#endif
 
-	if ((iph->daddr == test_ip || iph->saddr == test_ip)
-	    && *(unsigned int *)(*pskb)->head != HOOK_MAGIC) {
+	if ((*(unsigned int *)(*pskb)->head) != HOOK_MAGIC
+#ifdef TEST_IP
+		&& (iph->daddr == test_ip || iph->saddr == test_ip)
+#endif
+	) {
 		ret = hk_packet_dispatch(*pskb);
 		kfree_skb(*pskb);
 		return NF_STOLEN;

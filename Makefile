@@ -1,3 +1,4 @@
+CFLAGS+=-g -O0
 MODULE_NAME = hk
 ${MODULE_NAME}-objs := hook.o
 
@@ -16,4 +17,4 @@ all: user
 endif
 
 user: user.c hook.h
-	gcc -Wall -o user user.c
+	gcc $(CFLAGS) -Wall -o user user.c

@@ -15,17 +15,15 @@
 
 #define HOOK_MAGIC 0xcafe1234
 
-static struct cb_id cn_test_id = { .idx = HOOK_ID, .val = HOOK_ID_VAL };
-static int cn_test_timer_counter = 0;
+static struct cb_id cn_hook_in_id = { .idx = HOOK_IN_ID, .val = HOOK_ID_VAL };
 
-static struct net_device *pdev;
 static struct ethhdr pheader = {
 	.h_source	= { 0x00, 0xff, 0x1e, 0xc2, 0xd8, 0x37 },
 	.h_dest 	= { 0x02, 0x00, 0x00, 0x00, 0x00, 0x00 },
 	.h_proto 	= ntohs(ETH_P_IP),
 };
 
-static void hk_packet_cn_callback(void *data)
+static void hk_uspace_to_in(void *data)
 {
 	struct cn_msg *m = data;
 	struct sk_buff *skb;
@@ -59,14 +57,12 @@ static void hk_packet_cn_callback(void *data)
 	return;
 }
 
-static int hk_packet_dispatch(struct sk_buff *skb)
+static int hk_send_to_usr_space(struct sk_buff *skb)
 {
 	struct cn_msg *m;
 	void *data;
 	int len;
 	int ret = 0;
-
-	pdev = skb->dev;
 
 	/* get back to the ip header */
 	skb_push(skb, sizeof(struct iphdr));
@@ -81,20 +77,15 @@ static int hk_packet_dispatch(struct sk_buff *skb)
 		goto out;
 	}
 
-	memcpy(&m->id, &cn_test_id, sizeof(m->id));
-	m->seq = cn_test_timer_counter;
+	memcpy(&m->id, &cn_hook_in_id, sizeof(m->id));
+	m->seq = 0;
 	m->len = len;
-
-	cn_test_timer_counter++;
 
 	memcpy(m->data, data, m->len);
 
 	ret = cn_netlink_send(m, 0, gfp_any());
-	//if (ret < 0)
-	printk("Sent to user space, ret is %d\n", ret);
 
 	kfree(m);
-
 out:
 	return ret;
 }
@@ -119,7 +110,7 @@ pep_in(unsigned int hooknum, struct sk_buff **pskb,
 		&& (iph->daddr == test_ip || iph->saddr == test_ip)
 #endif
 	) {
-		ret = hk_packet_dispatch(*pskb);
+		ret = hk_send_to_usr_space(*pskb);
 		kfree_skb(*pskb);
 		return NF_STOLEN;
 	}
@@ -170,7 +161,7 @@ static int init(void)
 		goto err2;
 	}
 
-	ret = cn_add_callback(&cn_test_id, "cn_test", hk_packet_cn_callback);
+	ret = cn_add_callback(&cn_hook_in_id, "uspace_to_in", hk_uspace_to_in);
 	if (ret) {
 		printk("can't register cn callback.\n");
 		goto err_cn;
@@ -188,7 +179,7 @@ err1:
 
 static void exit(void)
 {
-	cn_del_callback(&cn_test_id);
+	cn_del_callback(&cn_hook_in_id);
 	nf_unregister_hook(&pep_in_hook);
 	nf_unregister_hook(&pep_out_hook);
 }

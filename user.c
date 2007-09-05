@@ -63,50 +63,20 @@ static void __attribute__((unused)) dump_mem(void *mem, size_t len, size_t size)
 }
 
 
-static int netlink_send_packet(int s, struct cn_msg *msg)
+static int netlink_send_packet(int s, struct nlmsghdr *nlm)
 {
-	struct nlmsghdr *nlh;
-	unsigned int size;
 	int err;
-	char buf[CONNECTOR_MAX_MSG_SIZE];
 	struct cn_msg *m;
 
-	size = NLMSG_SPACE(sizeof(struct cn_msg) + msg->len);
-
-	nlh = (struct nlmsghdr *)buf;
-	nlh->nlmsg_seq = 0;
-	nlh->nlmsg_pid = getpid();
-	nlh->nlmsg_type = NLMSG_DONE;
-	nlh->nlmsg_len = NLMSG_LENGTH(size - sizeof(*nlh));
-	nlh->nlmsg_flags = 0;
-
-	m = NLMSG_DATA(nlh);
-
-	memcpy(m, msg, sizeof(*m) + msg->len);
-
-	err = send(s, nlh, size, 0);
+	m = NLMSG_DATA(nlm);
+	err = send(s, nlm, nlm->nlmsg_len, 0);
 	if (err == -1) {
-		fprintf(stderr, "Failed to send: %s [%d].\n", strerror(errno), errno);
+		fprintf(stderr, "%s: Failed to send: %s [%d].\n", __FUNCTION__, strerror(errno), errno);
 	}
 
 	return err;
 }
 
-static int cn_send_packet(int s, void *buf, int len, int id)
-{
-	struct cn_msg *data;
-
-	data = (struct cn_msg *)buf;
-
-	data->id.idx = id;
-	data->id.val = HOOK_ID_VAL;
-	data->seq = 0;
-	data->ack = 0;
-	data->len = len;
-
-	len = netlink_send_packet(s, data);
-	return len;
-}
 
 static int open_hook_socket(int id)
 {
@@ -130,18 +100,48 @@ static int open_hook_socket(int id)
 	return s;
 }
 
+static struct nlmsghdr *encap_buffer(void *buf, int len, int id)
+{
+	struct nlmsghdr *nlm;
+	struct cn_msg *cnm;
+	int size;
+
+	size = NLMSG_SPACE(sizeof(struct cn_msg) + len);
+	nlm = malloc(size);
+	if (!buf)
+		return NULL;
+
+	nlm->nlmsg_seq = 0;
+	nlm->nlmsg_pid = getpid();
+	nlm->nlmsg_type = NLMSG_DONE;
+	nlm->nlmsg_len = NLMSG_LENGTH(size - sizeof(*nlm));
+	nlm->nlmsg_flags = 0;
+
+	cnm = NLMSG_DATA(nlm);
+	cnm->id.idx = id;
+	cnm->id.val = HOOK_ID_VAL;
+	cnm->seq = 0;
+	cnm->ack = 0;
+	cnm->len = len;
+	memcpy(cnm->data, buf, len);
+
+	return nlm;
+}
+
 static int recv_and_send(int s, int id)
 {
 	int len;
 	char buf[4096];
 	struct nlmsghdr *reply;
-	struct cn_msg *data;
+	struct cn_msg *cnm;
+	struct nlmsghdr *resp;
 
 	memset(buf, 0, sizeof(buf));
 	len = recv(s, buf, sizeof(buf), 0);
 	if (len < 0) {
 		return -1;
 	}
+
 	reply = (struct nlmsghdr *)buf;
 
 	switch (reply->nlmsg_type) {
@@ -149,8 +149,19 @@ static int recv_and_send(int s, int id)
 			fprintf(stderr, "Error message received.\n");
 			break;
 		case NLMSG_DONE:
-			data = (struct cn_msg *)NLMSG_DATA(reply);
-			cn_send_packet(s, data->data, len, id);
+			cnm = NLMSG_DATA(reply);
+			dump_zone(cnm->data, cnm->len);
+			resp = encap_buffer(cnm->data, cnm->len, id);
+			if (!resp) {
+				fprintf(stderr, "Failed to encap packet.\n");
+				return -1;
+			}
+			if (netlink_send_packet(s, resp) < 0) {
+				fprintf(stderr, "Failed to send packet.\n");
+				free(resp);
+				return -1;
+			}
+			free(resp);
 			break;
 		default:
 			break;

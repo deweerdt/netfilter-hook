@@ -15,5 +15,5 @@ all: user
 
 endif
 
-user: user.c
+user: user.c hook.h
 	gcc -Wall -o user user.c

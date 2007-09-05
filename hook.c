@@ -13,46 +13,38 @@
 
 #include "hook.h"
 
-#define HOOK_MAGIC 0xcafe1234
+#define HOOK_MAGIC_HEADER_SIZE 	16
+#define HOOK_MAGIC 		0xcafe1234
+#define IN_DEV 			"eth0"
 
+static struct net_device *in_dev;
 static struct cb_id cn_hook_in_id = { .idx = HOOK_IN_ID, .val = HOOK_ID_VAL };
 
-static struct ethhdr pheader = {
-	.h_source	= { 0x00, 0xff, 0x1e, 0xc2, 0xd8, 0x37 },
-	.h_dest 	= { 0x02, 0x00, 0x00, 0x00, 0x00, 0x00 },
-	.h_proto 	= ntohs(ETH_P_IP),
-};
-
-static void hk_uspace_to_in(void *data)
+static void hk_uspace_to_in(void *arg)
 {
-	struct cn_msg *m = data;
+	struct cn_msg *m = arg;
 	struct sk_buff *skb;
 	int ret;
 	int size;
 
-	m->len -= 56;
-	size = m->len + ETH_HLEN + 16 + 2;
-	printk("called back, sending %d\n", size);
+	size = m->len + HOOK_MAGIC_HEADER_SIZE + 2;
 	skb = dev_alloc_skb(size);
 	if (!skb) {
-		printk("Cannot allocate NET_SKB_PAD + m->len: %d bytes\n", size);
+		printk("%s: cannot allocate: %d bytes\n", __FUNCTION__, size);
 		return;
 	}
 
-	skb_reserve(skb, 16);
+	skb_reserve(skb, HOOK_MAGIC_HEADER_SIZE);
 	*(unsigned int *)skb->head = HOOK_MAGIC;
 
 	skb_reserve(skb, 2);
 
-	skb_put(skb, ETH_HLEN + m->len);
-	memcpy(skb->data, &pheader, ETH_HLEN);
-
          /* copy the data into the sk_buff */
-	memcpy(skb->data + ETH_HLEN, m->data, m->len);
+	memcpy(skb->data, m->data, m->len);
+	skb_put(skb, m->len);
 
-        skb->protocol = eth_type_trans(skb, dev_get_by_name("eth0"));
+        skb->protocol = eth_type_trans(skb, in_dev);
 	ret = netif_rx(skb);
-	printk("xmited packet, users are:%d %d\n", atomic_read(&skb->users), ret);
 
 	return;
 }
@@ -60,28 +52,23 @@ static void hk_uspace_to_in(void *data)
 static int hk_send_to_usr_space(struct sk_buff *skb)
 {
 	struct cn_msg *m;
-	void *data;
-	int len;
 	int ret = 0;
 
-	/* get back to the ip header */
-	skb_push(skb, sizeof(struct iphdr));
+	/* get back to the eth header */
+	skb_push(skb, sizeof(struct ethhdr));
 
-	data = skb->data;
-	len = skb->len;
-
-	m = kzalloc(sizeof(*m) + len, GFP_ATOMIC);
+	m = kzalloc(sizeof(*m) + skb->len, gfp_any());
 	if (!m) {
-		printk("cannot allocate %d bytes\n", len + sizeof(*m));
+		printk("cannot allocate %d bytes\n", skb->len + sizeof(*m));
 		ret = -ENOMEM;
 		goto out;
 	}
 
 	memcpy(&m->id, &cn_hook_in_id, sizeof(m->id));
 	m->seq = 0;
-	m->len = len;
+	m->len = skb->len;
 
-	memcpy(m->data, data, m->len);
+	memcpy(m->data, skb->data, skb->len);
 
 	ret = cn_netlink_send(m, 0, gfp_any());
 
@@ -148,6 +135,8 @@ static struct nf_hook_ops pep_out_hook = {
 static int init(void)
 {
 	int ret;
+
+	in_dev = dev_get_by_name(IN_DEV);
 
 	ret = nf_register_hook(&pep_in_hook);
 	if (ret < 0) {

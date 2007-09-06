@@ -172,7 +172,7 @@ static int recv_and_send(int s, int id)
 
 int main(int argc, char **argv)
 {
-	int s_in;
+	int s_in, s_out;
 	fd_set read_sock;
 	int line; /* used for debugging only */
 
@@ -182,12 +182,19 @@ int main(int argc, char **argv)
 		exit(-1);
 	}
 
+	s_out = open_hook_socket(HOOK_OUT_ID);
+	if (s_out < 0) {
+		perror("cannot open outbound netlink connection");
+		exit(-1);
+	}
+
 	while (1) {
 		int ret;
-		int s_max = s_in + 1;
+		int s_max = s_out + 1;
 
 		FD_ZERO(&read_sock);
 		FD_SET(s_in, &read_sock);
+		FD_SET(s_out, &read_sock);
 
 		ret = select(s_max, &read_sock, NULL, NULL, NULL);
 		if (ret < 0) {
@@ -200,7 +207,16 @@ int main(int argc, char **argv)
 		}
 
 		if (FD_ISSET(s_in, &read_sock)) {
+			printf("Sending to in\n");
 			ret = recv_and_send(s_in, HOOK_IN_ID);
+			if (ret < 0) {
+				line = __LINE__;
+				goto err;
+			}
+		}
+		if (FD_ISSET(s_out, &read_sock)) {
+			printf("Sending to out\n");
+			ret = recv_and_send(s_out, HOOK_OUT_ID);
 			if (ret < 0) {
 				line = __LINE__;
 				goto err;

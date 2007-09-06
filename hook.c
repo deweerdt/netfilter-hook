@@ -16,9 +16,12 @@
 #define HOOK_MAGIC_HEADER_SIZE 	16
 #define HOOK_MAGIC 		0xcafe1234
 #define IN_DEV 			"eth0"
+#define OUT_DEV 		"eth0"
 
 static struct net_device *in_dev;
-static struct cb_id cn_hook_in_id = { .idx = HOOK_IN_ID, .val = HOOK_ID_VAL };
+static struct net_device *out_dev;
+static struct cb_id cn_hook_in_id 	= { .idx = HOOK_IN_ID, .val = HOOK_ID_VAL };
+static struct cb_id cn_hook_out_id 	= { .idx = HOOK_OUT_ID, .val = HOOK_ID_VAL };
 
 static void hk_uspace_to_in(void *arg)
 {
@@ -49,7 +52,39 @@ static void hk_uspace_to_in(void *arg)
 	return;
 }
 
-static int hk_send_to_usr_space(struct sk_buff *skb)
+static void hk_uspace_to_out(void *arg)
+{
+	struct cn_msg *m = arg;
+	struct sk_buff *skb;
+	int ret;
+	int size;
+	unsigned char x[] = { 0x00, 0xFF, 0xDB, 0x02, 0xE5, 0xA9 };
+
+	size = m->len + 2;
+	skb = dev_alloc_skb(size);
+	if (!skb) {
+		printk("%s: cannot allocate: %d bytes\n", __FUNCTION__, size);
+		return;
+	}
+
+	skb_reserve(skb, 2);
+
+         /* copy the data into the sk_buff */
+	memcpy(skb->data, m->data, m->len);
+	skb_put(skb, m->len);
+	skb_pull(skb, sizeof(struct ethhdr));
+
+        skb->protocol = htons(ETH_P_IP);
+	skb->dev = out_dev;
+	if (out_dev->hard_header) {
+		out_dev->hard_header(skb, out_dev, ntohs(skb->protocol), x, out_dev->dev_addr, skb->len);
+	}
+	ret = dev_queue_xmit(skb);
+
+	return;
+}
+
+static int hk_send_to_usr_space(struct sk_buff *skb, struct cb_id *id)
 {
 	struct cn_msg *m;
 	int ret = 0;
@@ -64,7 +99,7 @@ static int hk_send_to_usr_space(struct sk_buff *skb)
 		goto out;
 	}
 
-	memcpy(&m->id, &cn_hook_in_id, sizeof(m->id));
+	memcpy(&m->id, id, sizeof(m->id));
 	m->seq = 0;
 	m->len = skb->len;
 
@@ -97,7 +132,7 @@ pep_in(unsigned int hooknum, struct sk_buff **pskb,
 		&& (iph->daddr == test_ip || iph->saddr == test_ip)
 #endif
 	) {
-		ret = hk_send_to_usr_space(*pskb);
+		ret = hk_send_to_usr_space(*pskb, &cn_hook_in_id);
 		kfree_skb(*pskb);
 		return NF_STOLEN;
 	}
@@ -109,11 +144,21 @@ pep_out(unsigned int hooknum, struct sk_buff **pskb,
 	 const struct net_device *in, const struct net_device *out,
 	 int (*okfn)(struct sk_buff *))
 {
-	int ret = NF_ACCEPT;
+	int ret;
+#ifdef TEST_IP
+	struct iphdr *iph = (struct iphdr *)skb_network_header(*pskb);
+#endif
 
-	//ret = hk_packet_dispatch(*pskb);
-	//printk("%s(): %d\n", __FUNCTION__, ret);
-	return ret;
+	if ((*(unsigned int *)(*pskb)->head) != HOOK_MAGIC
+#ifdef TEST_IP
+		&& (iph->daddr == test_ip || iph->saddr == test_ip)
+#endif
+	) {
+		ret = hk_send_to_usr_space(*pskb, &cn_hook_out_id);
+		kfree_skb(*pskb);
+		return NF_STOLEN;
+	}
+	return NF_ACCEPT;
 }
 
 static struct nf_hook_ops pep_in_hook = {
@@ -137,6 +182,7 @@ static int init(void)
 	int ret;
 
 	in_dev = dev_get_by_name(IN_DEV);
+	out_dev = dev_get_by_name(OUT_DEV);
 
 	ret = nf_register_hook(&pep_in_hook);
 	if (ret < 0) {
@@ -152,12 +198,20 @@ static int init(void)
 
 	ret = cn_add_callback(&cn_hook_in_id, "uspace_to_in", hk_uspace_to_in);
 	if (ret) {
-		printk("can't register cn callback.\n");
+		printk("can't register in cn callback.\n");
 		goto err_cn;
+	}
+
+	ret = cn_add_callback(&cn_hook_out_id, "uspace_to_out", hk_uspace_to_out);
+	if (ret) {
+		printk("can't register out cn callback.\n");
+		goto err_cn2;
 	}
 
 	return 0;
 
+err_cn2:
+	cn_del_callback(&cn_hook_in_id);
 err_cn:
 	nf_unregister_hook(&pep_out_hook);
 err2:
@@ -168,6 +222,7 @@ err1:
 
 static void exit(void)
 {
+	cn_del_callback(&cn_hook_out_id);
 	cn_del_callback(&cn_hook_in_id);
 	nf_unregister_hook(&pep_in_hook);
 	nf_unregister_hook(&pep_out_hook);

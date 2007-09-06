@@ -73,6 +73,7 @@ static void hk_uspace_to_out(void *arg)
 	memcpy(skb->data, m->data, m->len);
 	skb_put(skb, m->len);
 	skb_pull(skb, sizeof(struct ethhdr));
+	skb_reset_network_header(skb);
 
         skb->protocol = htons(ETH_P_IP);
 	skb->dev = out_dev;

@@ -8,6 +8,7 @@
 #include <linux/if_ether.h>
 #include <linux/etherdevice.h>
 #include <linux/netfilter_ipv4.h>
+#include <linux/version.h>
 
 #include <net/ip.h>
 #include <net/sock.h>
@@ -195,9 +196,57 @@ static struct nf_hook_ops pep_out_hook = {
 	.priority       = NF_IP_PRI_LAST,
 };
 
-static int init(void)
+/*
+ * Up to linux 2.6.24, the CONNECTOR_MAX_MSG_SIZE was limited to 1024, this
+ * function patches the sole location of the check in the kernel text code
+ * The following ifdef'ed code is a hack to work around this limitation
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,24)
+static __init_data int hk_patch_force;
+module_param(hk_patch_force, int, 0);
+MODULE_PARM_DESC(hk_patch_force, "Force patching even if the found default is not 1024");
+
+static __init_data unsigned long connector_max_msg_size_offset;
+module_param(connector_max_msg_size_offset, ulong, 80);
+MODULE_PARM_DESC(cn_input_addr, "The offset of the cmp $400, %ax (3d 00 04 00 00) instruction in cn_input");
+
+static __init_data unsigned long cn_input_addr;
+module_param(cn_input_addr, ulong, 0);
+MODULE_PARM_DESC(cn_input_addr, "The address of cn_input in the running kernel");
+
+static void __init hk_patch_hack(void)
+{
+	if (!cn_input_addr)
+		return;
+
+	unsigned long *addr = (unsigned long *)(cn_input_addr + connector_max_msg_size_offset);
+	unsigned long new_max = 16 * 1024;
+
+	if (*addr != 1024 && !hk_patch_force) {
+		printk("hk: addr value is not 1024 (it's %lu), use hk_patch_force=1 to patch anyway\n", *addr);
+		return;
+	}
+
+	memcpy(addr, &new_max, sizeof(new_max));
+
+	/* kprobes does that to sync the cpus */
+	sync_core();
+	if (cpu_has_clflush)
+		asm("clflush (%0) " :: "r" (addr) : "memory");
+	printk("hk: successfully patched the kernel, new max is %lu\n", *addr);
+}
+#else
+static void __init hk_patch_hack(void)
+{
+	return;
+}
+#endif
+
+static int __init init(void)
 {
 	int ret;
+
+	hk_patch_hack();
 
 	in_dev = dev_get_by_name(IN_DEV);
 	out_dev = dev_get_by_name(OUT_DEV);
@@ -238,7 +287,7 @@ err1:
 	return ret;
 }
 
-static void exit(void)
+static void __exit exit(void)
 {
 	cn_del_callback(&cn_hook_out_id);
 	cn_del_callback(&cn_hook_in_id);

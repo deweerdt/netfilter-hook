@@ -5,6 +5,7 @@
 #include <linux/kthread.h>
 #include <linux/connector.h>
 #include <linux/netfilter.h>
+#include <linux/if_ether.h>
 #include <linux/etherdevice.h>
 #include <linux/netfilter_ipv4.h>
 
@@ -58,7 +59,6 @@ static void hk_uspace_to_out(void *arg)
 	struct sk_buff *skb;
 	int ret;
 	int size;
-	unsigned char x[] = { 0x00, 0xFF, 0xDB, 0x02, 0xE5, 0xA9 };
 
 	size = m->len + 2;
 	skb = dev_alloc_skb(size);
@@ -75,10 +75,14 @@ static void hk_uspace_to_out(void *arg)
 	skb_pull(skb, sizeof(struct ethhdr));
 	skb_reset_network_header(skb);
 
-        skb->protocol = htons(ETH_P_IP);
+        skb->protocol = __constant_htons(ETH_P_IP);
 	skb->dev = out_dev;
 	if (out_dev->hard_header) {
-		out_dev->hard_header(skb, out_dev, ntohs(skb->protocol), x, out_dev->dev_addr, skb->len);
+		/*
+		 * We can pass NULL as dest mac header, because this was set
+		 * when sent to user space (see pep_out)
+		 */
+		out_dev->hard_header(skb, out_dev, ntohs(skb->protocol), NULL, out_dev->dev_addr, skb->len);
 	}
 	ret = dev_queue_xmit(skb);
 
@@ -146,6 +150,7 @@ pep_out(unsigned int hooknum, struct sk_buff **pskb,
 	 int (*okfn)(struct sk_buff *))
 {
 	int ret;
+	struct ethhdr *eth;
 #ifdef TEST_IP
 	struct iphdr *iph = (struct iphdr *)skb_network_header(*pskb);
 #endif
@@ -155,6 +160,14 @@ pep_out(unsigned int hooknum, struct sk_buff **pskb,
 		&& (iph->daddr == test_ip || iph->saddr == test_ip)
 #endif
 	) {
+		/* Save the dest mac now, it will be lost otherwise */
+		if ((*pskb)->dst && (*pskb)->dst->neighbour) {
+			skb_push((*pskb), sizeof(struct ethhdr));
+			eth = (struct ethhdr *)(*pskb)->data;
+			skb_pull((*pskb), sizeof(struct ethhdr));
+			memcpy(eth->h_dest, (*pskb)->dst->neighbour->ha, ETH_ALEN);
+		}
+
 		ret = hk_send_to_usr_space(*pskb, &cn_hook_out_id);
 		kfree_skb(*pskb);
 		return NF_STOLEN;
@@ -175,7 +188,11 @@ static struct nf_hook_ops pep_out_hook = {
 	.owner		= THIS_MODULE,
 	.pf		= PF_INET,
 	.hooknum        = NF_IP_POST_ROUTING,
-	.priority       = NF_IP_PRI_FIRST,
+	/*
+	 * We are last, because we want all the routing process to be
+	 * made as normal before (maybe) stealing the packet
+	 */
+	.priority       = NF_IP_PRI_LAST,
 };
 
 static int init(void)

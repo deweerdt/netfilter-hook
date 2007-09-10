@@ -24,6 +24,7 @@
 #define pr_debug(...) do {} while(0)
 #endif
 
+static int debug;
 static void __attribute__((unused)) dump_mem(void *mem, size_t len, size_t size)
 {
 	uint8_t *u8;
@@ -136,7 +137,6 @@ static int recv_and_send(int s, int id)
 	struct cn_msg *cnm;
 	struct nlmsghdr *resp;
 
-	memset(buf, 0, sizeof(buf));
 	len = recv(s, buf, sizeof(buf), 0);
 	if (len < 0) {
 		return -1;
@@ -150,7 +150,8 @@ static int recv_and_send(int s, int id)
 			break;
 		case NLMSG_DONE:
 			cnm = NLMSG_DATA(reply);
-			dump_zone(cnm->data, cnm->len);
+			if (debug)
+				dump_zone(cnm->data, cnm->len);
 			resp = encap_buffer(cnm->data, cnm->len, id);
 			if (!resp) {
 				fprintf(stderr, "Failed to encap packet.\n");
@@ -175,6 +176,8 @@ int main(int argc, char **argv)
 	int s_in, s_out;
 	fd_set read_sock;
 	int line; /* used for debugging only */
+
+	debug = getenv("DEBUG") != NULL;
 
 	s_in = open_hook_socket(HOOK_IN_ID);
 	if (s_in < 0) {
@@ -207,7 +210,8 @@ int main(int argc, char **argv)
 		}
 
 		if (FD_ISSET(s_in, &read_sock)) {
-			printf("Sending to in\n");
+			if (debug)
+				printf("Sending to in\n");
 			ret = recv_and_send(s_in, HOOK_IN_ID);
 			if (ret < 0) {
 				line = __LINE__;
@@ -215,7 +219,8 @@ int main(int argc, char **argv)
 			}
 		}
 		if (FD_ISSET(s_out, &read_sock)) {
-			printf("Sending to out\n");
+			if (debug)
+				printf("Sending to out\n");
 			ret = recv_and_send(s_out, HOOK_OUT_ID);
 			if (ret < 0) {
 				line = __LINE__;

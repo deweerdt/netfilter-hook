@@ -208,7 +208,7 @@ MODULE_PARM_DESC(hk_patch_force, "Force patching even if the found default is no
 
 static __init_data unsigned long connector_max_msg_size_offset;
 module_param(connector_max_msg_size_offset, ulong, 80);
-MODULE_PARM_DESC(cn_input_addr, "The offset of the cmp $400, %ax (3d 00 04 00 00) instruction in cn_input");
+MODULE_PARM_DESC(connector_max_msg_size_offset, "The offset of the cmp $400, %ax (3d 00 04 00 00) instruction in cn_input");
 
 static __init_data unsigned long cn_input_addr;
 module_param(cn_input_addr, ulong, 0);

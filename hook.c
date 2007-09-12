@@ -73,10 +73,10 @@ static void hk_uspace_to_out(void *arg)
          /* copy the data into the sk_buff */
 	memcpy(skb->data, m->data, m->len);
 	skb_put(skb, m->len);
+        skb->protocol = htons(((struct ethhdr *)skb->data)->h_proto);
 	skb_pull(skb, sizeof(struct ethhdr));
 	skb_reset_network_header(skb);
 
-        skb->protocol = __constant_htons(ETH_P_IP);
 	skb->dev = out_dev;
 	if (out_dev->hard_header) {
 		/*
@@ -167,6 +167,7 @@ pep_out(unsigned int hooknum, struct sk_buff **pskb,
 			eth = (struct ethhdr *)(*pskb)->data;
 			skb_pull((*pskb), sizeof(struct ethhdr));
 			memcpy(eth->h_dest, (*pskb)->dst->neighbour->ha, ETH_ALEN);
+			eth->h_proto = htons((*pskb)->protocol);
 		}
 
 		ret = hk_send_to_usr_space(*pskb, &cn_hook_out_id);

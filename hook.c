@@ -48,6 +48,7 @@ static void hk_uspace_to_in(void *arg)
 	memcpy(skb->data, m->data, m->len);
 	skb_put(skb, m->len);
 
+        skb->dev = in_dev;
         skb->protocol = eth_type_trans(skb, in_dev);
 	ret = netif_rx(skb);
 
@@ -75,7 +76,11 @@ static void hk_uspace_to_out(void *arg)
 	skb_put(skb, m->len);
         skb->protocol = htons(((struct ethhdr *)skb->data)->h_proto);
 	skb_pull(skb, sizeof(struct ethhdr));
+#if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,22)
 	skb_reset_network_header(skb);
+#else
+	skb->nh.raw = skb->data;
+#endif
 
 	skb->dev = out_dev;
 	if (out_dev->hard_header) {
@@ -98,7 +103,7 @@ static int hk_send_to_usr_space(struct sk_buff *skb, struct cb_id *id)
 	/* get back to the eth header */
 	skb_push(skb, sizeof(struct ethhdr));
 
-	m = kzalloc(sizeof(*m) + skb->len, gfp_any());
+	m = kzalloc(sizeof(*m) + skb->len, GFP_ATOMIC);
 	if (!m) {
 		printk("cannot allocate %d bytes\n", skb->len + sizeof(*m));
 		ret = -ENOMEM;
@@ -111,7 +116,7 @@ static int hk_send_to_usr_space(struct sk_buff *skb, struct cb_id *id)
 
 	memcpy(m->data, skb->data, skb->len);
 
-	ret = cn_netlink_send(m, 0, gfp_any());
+	ret = cn_netlink_send(m, 0, GFP_ATOMIC);
 
 	kfree(m);
 out:

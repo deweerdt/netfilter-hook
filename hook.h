@@ -5,16 +5,6 @@
 #define HOOK_OUT_ID 	(CN_NETLINK_USERS + 2)
 #define HOOK_ID_VAL 	0x1
 
-#ifdef __KERNEL__
-#  if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,16)
-#     define cpu_has_clflush boot_cpu_has(X86_FEATURE_CLFLSH)
-#  endif
-#  if defined(__i386__)
-#     define htons(x) (x << 8 | x >> 8)
-#     define ntohs(x) (x << 8 | x >> 8)
-#  endif
-#endif
-
 #ifndef __KERNEL__
 #define printk printf
 #define KERN_ERR

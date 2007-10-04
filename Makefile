@@ -12,7 +12,7 @@ KDIR	?= /lib/modules/$(shell uname -r)/build
 PWD	:= $(shell pwd)
 
 all: user
-	$(MAKE) C=1 -C $(KDIR) M=$(PWD) modules
+	$(MAKE) -C $(KDIR) M=$(PWD) modules
 
 endif
 

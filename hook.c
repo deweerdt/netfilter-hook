@@ -24,6 +24,12 @@
 
 static int magic = HOOK_MAGIC;
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,23)
+#define NET_NAMESPACE
+#else
+#define NET_NAMESPACE &init_net,
+#endif
+
 static struct net_device *in_dev;
 static struct net_device *out_dev;
 static struct cb_id cn_hook_in_id 	= { .idx = HOOK_IN_ID, .val = HOOK_ID_VAL };
@@ -57,7 +63,6 @@ static void hk_uspace_to_in(void *arg)
 	memcpy(skb->data, m->data, m->len);
 	skb_put(skb, m->len);
 
-        skb->dev = in_dev;
         skb->protocol = eth_type_trans(skb, in_dev);
 	ret = netif_rx(skb);
 
@@ -96,10 +101,8 @@ static void hk_uspace_to_out(void *arg)
 
 #if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,22)
 	skb_reset_network_header(skb);
-#else
-	skb->nh.raw = skb->data;
-#endif
 
+        skb->protocol = __constant_htons(ETH_P_IP);
 	skb->dev = out_dev;
 	if (out_dev->hard_header) {
 		/*
@@ -127,7 +130,7 @@ static int hk_send_to_usr_space(struct sk_buff *skb, struct cb_id *id)
 	/* get back to the eth header */
 	skb_push(skb, sizeof(struct ethhdr));
 
-	m = kzalloc(sizeof(*m) + skb->len, GFP_ATOMIC);
+	m = kzalloc(sizeof(*m) + skb->len, gfp_any());
 	if (!m) {
 		printk("cannot allocate %d bytes\n", skb->len + sizeof(*m));
 		ret = -ENOMEM;
@@ -140,7 +143,7 @@ static int hk_send_to_usr_space(struct sk_buff *skb, struct cb_id *id)
 
 	memcpy(m->data, skb->data, skb->len);
 
-	ret = cn_netlink_send(m, 0, GFP_ATOMIC);
+	ret = cn_netlink_send(m, 0, gfp_any());
 
 	kfree(m);
 out:
@@ -203,7 +206,6 @@ pep_out(unsigned int hooknum, struct sk_buff **pskb,
 			eth = (struct ethhdr *)(*pskb)->data;
 			skb_pull((*pskb), sizeof(struct ethhdr));
 			memcpy(eth->h_dest, (*pskb)->dst->neighbour->ha, ETH_ALEN);
-			eth->h_proto = htons((*pskb)->protocol);
 		}
 
 		ret = hk_send_to_usr_space(*pskb, &cn_hook_out_id);
@@ -284,8 +286,8 @@ static int __init init(void)
 
 	hk_patch_hack();
 
-	in_dev = dev_get_by_name(IN_DEV);
-	out_dev = dev_get_by_name(OUT_DEV);
+	in_dev = dev_get_by_name(NET_NAMESPACE IN_DEV);
+	out_dev = dev_get_by_name(NET_NAMESPACE OUT_DEV);
 
 	ret = nf_register_hook(&pep_in_hook);
 	if (ret < 0) {

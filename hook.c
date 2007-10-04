@@ -20,6 +20,10 @@
 #define IN_DEV 			"eth0"
 #define OUT_DEV 		"eth0"
 
+#undef DEBUG
+
+static int magic = HOOK_MAGIC;
+
 static struct net_device *in_dev;
 static struct net_device *out_dev;
 static struct cb_id cn_hook_in_id 	= { .idx = HOOK_IN_ID, .val = HOOK_ID_VAL };
@@ -32,6 +36,11 @@ static void hk_uspace_to_in(void *arg)
 	int ret;
 	int size;
 
+#ifdef DEBUG
+	printk("%s\n", __FUNCTION__);
+	dump_zone(m->data, m->len);
+#endif
+
 	size = m->len + HOOK_MAGIC_HEADER_SIZE + 2;
 	skb = dev_alloc_skb(size);
 	if (!skb) {
@@ -40,9 +49,9 @@ static void hk_uspace_to_in(void *arg)
 	}
 
 	skb_reserve(skb, HOOK_MAGIC_HEADER_SIZE);
-	*(unsigned int *)skb->head = HOOK_MAGIC;
 
 	skb_reserve(skb, 2);
+	memcpy(skb->cb, &magic, sizeof(magic));
 
          /* copy the data into the sk_buff */
 	memcpy(skb->data, m->data, m->len);
@@ -62,20 +71,29 @@ static void hk_uspace_to_out(void *arg)
 	int ret;
 	int size;
 
-	size = m->len + 2;
+#ifdef DEBUG
+	printk("%s\n", __FUNCTION__);
+	dump_zone(m->data, m->len);
+#endif
+
+	//printk("packet len to out is %d\n", m->len);
+	size = m->len + 2 + HOOK_MAGIC_HEADER_SIZE;
 	skb = dev_alloc_skb(size);
 	if (!skb) {
 		printk("%s: cannot allocate: %d bytes\n", __FUNCTION__, size);
 		return;
 	}
 
+	memcpy(skb->cb, &magic, sizeof(magic));
+
 	skb_reserve(skb, 2);
 
          /* copy the data into the sk_buff */
 	memcpy(skb->data, m->data, m->len);
 	skb_put(skb, m->len);
-        skb->protocol = htons(((struct ethhdr *)skb->data)->h_proto);
+        skb->protocol = ((struct ethhdr *)skb->data)->h_proto;
 	skb_pull(skb, sizeof(struct ethhdr));
+
 #if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,22)
 	skb_reset_network_header(skb);
 #else
@@ -90,6 +108,12 @@ static void hk_uspace_to_out(void *arg)
 		 */
 		out_dev->hard_header(skb, out_dev, ntohs(skb->protocol), NULL, out_dev->dev_addr, skb->len);
 	}
+	{
+		unsigned char out_addr[] = { 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 };
+		memcpy(skb->data + sizeof(out_addr), out_addr, sizeof(out_addr));
+	}
+
+
 	ret = dev_queue_xmit(skb);
 
 	return;
@@ -123,9 +147,12 @@ out:
 	return ret;
 }
 
+#define TEST_IP 1
 #ifdef TEST_IP
 /* static unsigned int test_ip = htonl(0xd41b300a); */ /* 212.27.48.10 */
-static unsigned int test_ip = htonl(0xc0a80101); /* 192.168.1.1 */
+/* static unsigned int test_ip = htonl(0xc0a80101); */ /* 192.168.1.1 */
+/* static unsigned int test_ip = 0x55171fac; */ /* 172.31.23.85 */
+static unsigned int test_ip = 0x04040404; /* 4.4.4.4 */
 #endif
 
 static unsigned int
@@ -135,10 +162,12 @@ pep_in(unsigned int hooknum, struct sk_buff **pskb,
 {
 	int ret;
 #ifdef TEST_IP
-	struct iphdr *iph = (struct iphdr *)skb_network_header(*pskb);
+	//struct iphdr *iph = (struct iphdr *)skb_network_header(*pskb);
+	struct iphdr *iph = (struct iphdr *)(*pskb)->nh.raw;
 #endif
+	//printk("pep_in: %p: 0x%x -> 0x%x\n", *pskb, iph->saddr, iph->daddr);
 
-	if ((*(unsigned int *)(*pskb)->head) != HOOK_MAGIC
+	if (memcmp((*pskb)->cb, &magic, sizeof(magic))
 #ifdef TEST_IP
 		&& (iph->daddr == test_ip || iph->saddr == test_ip)
 #endif
@@ -158,10 +187,12 @@ pep_out(unsigned int hooknum, struct sk_buff **pskb,
 	int ret;
 	struct ethhdr *eth;
 #ifdef TEST_IP
-	struct iphdr *iph = (struct iphdr *)skb_network_header(*pskb);
+	//struct iphdr *iph = (struct iphdr *)skb_network_header(*pskb);
+	struct iphdr *iph = (struct iphdr *)(*pskb)->nh.raw;
 #endif
+	//printk("pep_out: 0x%x -> 0x%x\n", iph->saddr, iph->daddr);
 
-	if ((*(unsigned int *)(*pskb)->head) != HOOK_MAGIC
+	if (memcmp((*pskb)->cb, &magic, sizeof(magic))
 #ifdef TEST_IP
 		&& (iph->daddr == test_ip || iph->saddr == test_ip)
 #endif

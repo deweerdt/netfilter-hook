@@ -112,6 +112,7 @@ static void hk_uspace_to_out(void *arg)
 		out_dev->hard_header(skb, out_dev, ntohs(skb->protocol), NULL, out_dev->dev_addr, skb->len);
 	}
 	{
+		/* TODO obtain next hop from the cli */
 		unsigned char out_addr[] = { 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 };
 		memcpy(skb->data + sizeof(out_addr), out_addr, sizeof(out_addr));
 	}
@@ -168,7 +169,6 @@ pep_in(unsigned int hooknum, struct sk_buff **pskb,
 	//struct iphdr *iph = (struct iphdr *)skb_network_header(*pskb);
 	struct iphdr *iph = (struct iphdr *)(*pskb)->nh.raw;
 #endif
-	//printk("pep_in: %p: 0x%x -> 0x%x\n", *pskb, iph->saddr, iph->daddr);
 
 	if (memcmp((*pskb)->cb, &magic, sizeof(magic))
 #ifdef TEST_IP

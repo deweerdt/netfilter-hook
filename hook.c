@@ -15,8 +15,8 @@
 
 #include "hook.h"
 
-#define IN_DEV 			"eth0"
-#define OUT_DEV 		"eth0"
+#define IN_DEV 			"dvbsat0"
+#define OUT_DEV 		"dvbsat0"
 
 #define DEBUG 1
 
@@ -79,8 +79,10 @@ static void uspace_to_in(void *arg)
 	skb_put(skb, m->len);
 
         skb->protocol = eth_type_trans(skb, in_dev);
+#ifdef DEBUG
 	printk("%s: skb %p, skb->cb is %p\n", __FUNCTION__, skb, skb->cb);
 	dump_zone(skb->cb, sizeof(skb->cb));
+#endif
 	ret = netif_rx(skb);
 
 	return;
@@ -96,9 +98,9 @@ static void uspace_to_out(void *arg)
 #ifdef DEBUG
 	printk("%s\n", __FUNCTION__);
 	dump_zone(m->data, m->len);
+	printk("packet len to out is %d\n", m->len);
 #endif
 
-	//printk("packet len to out is %d\n", m->len);
 	skb = dev_alloc_skb(size);
 	if (!skb) {
 		printk("%s: cannot allocate: %d bytes\n", __FUNCTION__, size);
@@ -125,7 +127,7 @@ static void uspace_to_out(void *arg)
 		 * We can pass NULL as dest mac header, because this was set
 		 * when sent to user space (see nf_out)
 		 */
-		out_dev->hard_header(skb, out_dev, ntohs(skb->protocol), NULL, out_dev->dev_addr, skb->len);
+		out_dev->hard_header(skb, out_dev, be16_to_cpu(skb->protocol), NULL, out_dev->dev_addr, skb->len);
 	}
 #if 0
 	/* This is a quick hack for 2.6.16 */
@@ -186,14 +188,17 @@ nf_in(unsigned int hooknum, struct sk_buff **pskb,
 	int ret;
 	struct skb_entry *e;
 #ifdef TEST_IP
+#  if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,22)
 	struct iphdr *iph = (struct iphdr *)skb_network_header(*pskb);
-	//struct iphdr *iph = (struct iphdr *)(*pskb)->nh.raw;
+#  else
+	struct iphdr *iph = (struct iphdr *)(*pskb)->nh.raw;
+#  endif
 #endif
 
 	e = is_hooked(*pskb);
 	if (!e
 #ifdef TEST_IP
-		&& (iph->daddr == ntohl(test_ip) || iph->saddr == ntohl(test_ip))
+		&& (iph->daddr == be32_to_cpu(test_ip) || iph->saddr == be32_to_cpu(test_ip))
 #endif
 	) {
 	        e = kmalloc(sizeof(*e), GFP_ATOMIC);
@@ -207,9 +212,11 @@ nf_in(unsigned int hooknum, struct sk_buff **pskb,
 
 		ret = send_to_uspace(*pskb, &cn_hook_in_id);
 		kfree_skb(*pskb);
+#ifdef DEBUG
 		printk("stolen: %s\n", __FUNCTION__);
 		printk("%s: skb %p, skb->cb is %p\n", __FUNCTION__, (*pskb), (*pskb)->cb);
 		dump_zone((*pskb)->cb, sizeof((*pskb)->cb));
+#endif
 		return NF_STOLEN;
 	}
 	if (e) {
@@ -229,14 +236,17 @@ nf_out(unsigned int hooknum, struct sk_buff **pskb,
 	int ret;
 	struct ethhdr *eth;
 #ifdef TEST_IP
+#  if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,22)
 	struct iphdr *iph = (struct iphdr *)skb_network_header(*pskb);
-	//struct iphdr *iph = (struct iphdr *)(*pskb)->nh.raw;
+#  else
+	struct iphdr *iph = (struct iphdr *)(*pskb)->nh.raw;
+#  endif
 #endif
 	//printk("nf_out: 0x%x -> 0x%x\n", iph->saddr, iph->daddr);
 
 	if (!is_hooked(*pskb)
 #ifdef TEST_IP
-		&& (iph->daddr == ntohl(test_ip) || iph->saddr == ntohl(test_ip))
+		&& (iph->daddr == be32_to_cpu(test_ip) || iph->saddr == be32_to_cpu(test_ip))
 #endif
 	) {
 		/* Save the dest mac now, it will be lost otherwise */
@@ -249,7 +259,9 @@ nf_out(unsigned int hooknum, struct sk_buff **pskb,
 
 		ret = send_to_uspace(*pskb, &cn_hook_out_id);
 		kfree_skb(*pskb);
+#ifdef DEBUG
 		printk("stolen: %s\n", __FUNCTION__);
+#endif
 		return NF_STOLEN;
 	}
 	return NF_ACCEPT;
@@ -310,8 +322,10 @@ static void __init hk_patch_hack(void)
 
 	/* kprobes does that to sync the cpus */
 	sync_core();
+#if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,22)
 	if (cpu_has_clflush)
 		asm("clflush (%0) " :: "r" (addr) : "memory");
+#endif
 }
 #else
 static void __init hk_patch_hack(void)

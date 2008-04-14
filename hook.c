@@ -174,7 +174,8 @@ out:
 
 #define TEST_IP 1
 #ifdef TEST_IP
-static unsigned int test_ip = 0xd41b300a; /* 212.27.48.10 */
+static unsigned int test_ip = 0x0a7a507b; /* 10.122.80.123 */
+/* static unsigned int test_ip = 0xd41b300a; */ /* 212.27.48.10 */
 /* static unsigned int test_ip = 0xc0a80101; */ /* 192.168.1.1 */
 /* static unsigned int test_ip = 0x55171fac; */ /* 172.31.23.85 */
 /* static unsigned int test_ip = 0x04040404; */ /* 4.4.4.4 */
@@ -366,6 +367,7 @@ static int __init init(void)
 		printk("can't register out cn callback.\n");
 		goto err_cn2;
 	}
+	printk(KERN_INFO "Hook module loaded\n");
 
 	return 0;
 
@@ -385,6 +387,7 @@ static void __exit exit(void)
 	cn_del_callback(&cn_hook_in_id);
 	nf_unregister_hook(&nf_in_hook);
 	nf_unregister_hook(&nf_out_hook);
+	printk(KERN_INFO "Hook module unloaded\n");
 }
 
 module_init(init)

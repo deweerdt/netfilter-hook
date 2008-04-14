@@ -15,8 +15,8 @@
 
 #include "hook.h"
 
-#define IN_DEV 			"dvbsat0"
-#define OUT_DEV 		"dvbsat0"
+#define IN_DEV 			"eth0"
+#define OUT_DEV 		"eth0"
 
 #define DEBUG 1
 

@@ -1,14 +1,49 @@
 #ifndef __HOOK_H__
 #define __HOOK_H__
 
-#define HOOK_IN_ID 	(CN_NETLINK_USERS + 1)
-#define HOOK_OUT_ID 	(CN_NETLINK_USERS + 2)
-#define HOOK_ID_VAL 	0x1
+enum {
+	NH_SET_FILTER = 1,
+	NH_RM_FILTER = 2,
+	NH_SET_WRITE_MODE = 3,
+};
+
+enum {
+	TO_INTERFACE = (1 << 0),
+	TO_ROUTING_STACK = (1 << 1),
+};
+
+struct nh_writer {
+	char dest_dev_str[255];
+	void *dest_dev;
+	int mode;
+};
+
+struct nh_filter {
+	unsigned char proto;
+	unsigned long saddr;
+	unsigned long daddr;
+	unsigned short dport;
+	unsigned short sport;
+	char in_dev[255];
+	char out_dev[255];
+	void *in;
+	void *out;
+	int priority;
+	int hooknum;
+	int flags;
+};
+
 
 #ifndef __KERNEL__
+
+#include <stdio.h>
+#include <linux/netfilter.h>
+
 #define printk printf
 #define KERN_ERR
+
 #endif
+
 static void dump_line(char *data, int offset, int limit)
 {
 	int i;

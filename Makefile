@@ -1,4 +1,4 @@
-CFLAGS+=-g -O0 -Wall
+CFLAGS+=-g -O0
 MODULE_NAME = hk
 ${MODULE_NAME}-objs := hook.o
 

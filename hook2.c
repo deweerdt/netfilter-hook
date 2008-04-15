@@ -51,6 +51,7 @@ struct nh_private {
 
 };
 
+
 #define NF_IP_NUMHOOKS 5
 static struct nf_hook_ops *cb_in_use[NF_IP_NUMHOOKS];
 
@@ -74,7 +75,7 @@ static struct nh_private *pass(struct sk_buff *skb,
 	struct tcphdr *tph = (struct tcphdr *)skb_transport_header(skb);
 #else
 	struct iphdr *iph = (struct iphdr *)skb->nh.raw;
-	struct tcphdr *tph = (struct tcphdr *)skb->th.raw;
+	struct tcphdr *tph = (struct tcphdr *)skb->h.raw;
 #endif
 	struct nh_private *e;
 
@@ -139,6 +140,12 @@ static unsigned int nf_cb(
 }
 
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,24)
+#define NET_NAMESPACE
+#else
+#define NET_NAMESPACE &init_net,
+#endif
+
 int setup_filter(struct nh_private *p)
 {
 	struct nh_filter *f = p->filter;
@@ -149,10 +156,10 @@ int setup_filter(struct nh_private *p)
 	if (!nf_hook)
 		return -ENOMEM;
 
-	f->in = dev_get_by_name(&init_net, f->in_dev);
+	f->in = dev_get_by_name(NET_NAMESPACE f->in_dev);
 	if (!f->in)
 		f->flags |= CHECK_IN;
-	f->out = dev_get_by_name(&init_net, f->out_dev);
+	f->out = dev_get_by_name(NET_NAMESPACE f->out_dev);
 	if (f->out)
 	       f->flags |= CHECK_OUT;
 	if (f->saddr)

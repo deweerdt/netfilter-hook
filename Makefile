@@ -1,4 +1,4 @@
-EXTRA_CFLAGS+=-g -O0 -Wall
+CFLAGS+=-g -O0 -Wall
 MODULE_NAME = hk
 ${MODULE_NAME}-objs := hook2.o
 

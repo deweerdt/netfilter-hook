@@ -13,7 +13,6 @@
 #include <net/ip.h>
 #include <net/sock.h>
 
-#include "hack.h"
 #include "hook.h"
 
 #define IN_DEV 			"eth0"
@@ -80,8 +79,10 @@ static void uspace_to_in(void *arg)
 	skb_put(skb, m->len);
 
         skb->protocol = eth_type_trans(skb, in_dev);
+#ifdef DEBUG
 	printk("%s: skb %p, skb->cb is %p\n", __FUNCTION__, skb, skb->cb);
 	dump_zone(skb->cb, sizeof(skb->cb));
+#endif
 	ret = netif_rx(skb);
 
 	return;
@@ -97,9 +98,9 @@ static void uspace_to_out(void *arg)
 #ifdef DEBUG
 	printk("%s\n", __FUNCTION__);
 	dump_zone(m->data, m->len);
+	printk("packet len to out is %d\n", m->len);
 #endif
 
-	//printk("packet len to out is %d\n", m->len);
 	skb = dev_alloc_skb(size);
 	if (!skb) {
 		printk("%s: cannot allocate: %d bytes\n", __FUNCTION__, size);
@@ -121,17 +122,13 @@ static void uspace_to_out(void *arg)
 
         skb->protocol = __constant_htons(ETH_P_IP);
 	skb->dev = out_dev;
-#if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,23)
-		dev_hard_header(skb, out_dev, be16_to_cpu(skb->protocol), NULL, out_dev->dev_addr, skb->len);
-#else
 	if (out_dev->hard_header) {
 		/*
 		 * We can pass NULL as dest mac header, because this was set
 		 * when sent to user space (see nf_out)
 		 */
-		out_dev->hard_header(skb, out_dev, ntohs(skb->protocol), NULL, out_dev->dev_addr, skb->len);
+		out_dev->hard_header(skb, out_dev, be16_to_cpu(skb->protocol), NULL, out_dev->dev_addr, skb->len);
 	}
-#endif
 #if 0
 	/* This is a quick hack for 2.6.16 */
 	{
@@ -177,37 +174,32 @@ out:
 
 #define TEST_IP 1
 #ifdef TEST_IP
-static unsigned int test_ip = 0xd41b300a; /* 212.27.48.10 */
+static unsigned int test_ip = 0x0a7a507b; /* 10.122.80.123 */
+/* static unsigned int test_ip = 0xd41b300a; */ /* 212.27.48.10 */
 /* static unsigned int test_ip = 0xc0a80101; */ /* 192.168.1.1 */
 /* static unsigned int test_ip = 0x55171fac; */ /* 172.31.23.85 */
 /* static unsigned int test_ip = 0x04040404; */ /* 4.4.4.4 */
 #endif
 
 static unsigned int
-nf_in(unsigned int hooknum,
-#if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,23)
-      struct sk_buff *skb,
-#else
-      struct sk_buff **pskb,
-#endif
-
-      const struct net_device *in, const struct net_device *out,
-      int (*okfn)(struct sk_buff *))
+nf_in(unsigned int hooknum, struct sk_buff **pskb,
+	 const struct net_device *in, const struct net_device *out,
+	 int (*okfn)(struct sk_buff *))
 {
 	int ret;
 	struct skb_entry *e;
-#if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,23)
-      struct sk_buff **pskb = &skb;
-#endif
 #ifdef TEST_IP
+#  if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,22)
 	struct iphdr *iph = (struct iphdr *)skb_network_header(*pskb);
-	//struct iphdr *iph = (struct iphdr *)(*pskb)->nh.raw;
+#  else
+	struct iphdr *iph = (struct iphdr *)(*pskb)->nh.raw;
+#  endif
 #endif
 
 	e = is_hooked(*pskb);
 	if (!e
 #ifdef TEST_IP
-		&& (iph->daddr == ntohl(test_ip) || iph->saddr == ntohl(test_ip))
+		&& (iph->daddr == be32_to_cpu(test_ip) || iph->saddr == be32_to_cpu(test_ip))
 #endif
 	) {
 	        e = kmalloc(sizeof(*e), GFP_ATOMIC);
@@ -221,9 +213,11 @@ nf_in(unsigned int hooknum,
 
 		ret = send_to_uspace(*pskb, &cn_hook_in_id);
 		kfree_skb(*pskb);
+#ifdef DEBUG
 		printk("stolen: %s\n", __FUNCTION__);
 		printk("%s: skb %p, skb->cb is %p\n", __FUNCTION__, (*pskb), (*pskb)->cb);
 		dump_zone((*pskb)->cb, sizeof((*pskb)->cb));
+#endif
 		return NF_STOLEN;
 	}
 	if (e) {
@@ -236,29 +230,24 @@ nf_in(unsigned int hooknum,
 }
 
 static unsigned int
-nf_out(unsigned int hooknum,
-#if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,23)
-       struct sk_buff *skb,
-#else
-       struct sk_buff **pskb,
-#endif
-       const struct net_device *in, const struct net_device *out,
-       int (*okfn)(struct sk_buff *))
+nf_out(unsigned int hooknum, struct sk_buff **pskb,
+	 const struct net_device *in, const struct net_device *out,
+	 int (*okfn)(struct sk_buff *))
 {
 	int ret;
 	struct ethhdr *eth;
-#if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,23)
-       struct sk_buff **pskb = &skb;
-#endif
 #ifdef TEST_IP
+#  if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,22)
 	struct iphdr *iph = (struct iphdr *)skb_network_header(*pskb);
-	//struct iphdr *iph = (struct iphdr *)(*pskb)->nh.raw;
+#  else
+	struct iphdr *iph = (struct iphdr *)(*pskb)->nh.raw;
+#  endif
 #endif
 	//printk("nf_out: 0x%x -> 0x%x\n", iph->saddr, iph->daddr);
 
 	if (!is_hooked(*pskb)
 #ifdef TEST_IP
-		&& (iph->daddr == ntohl(test_ip) || iph->saddr == ntohl(test_ip))
+		&& (iph->daddr == be32_to_cpu(test_ip) || iph->saddr == be32_to_cpu(test_ip))
 #endif
 	) {
 		/* Save the dest mac now, it will be lost otherwise */
@@ -271,7 +260,9 @@ nf_out(unsigned int hooknum,
 
 		ret = send_to_uspace(*pskb, &cn_hook_out_id);
 		kfree_skb(*pskb);
+#ifdef DEBUG
 		printk("stolen: %s\n", __FUNCTION__);
+#endif
 		return NF_STOLEN;
 	}
 	return NF_ACCEPT;
@@ -296,6 +287,53 @@ static struct nf_hook_ops nf_out_hook = {
 	 */
 	.priority       = NF_IP_PRI_LAST,
 };
+
+/*
+ * Up to linux 2.6.24, the CONNECTOR_MAX_MSG_SIZE was limited to 1024, this
+ * function patches the sole location of the check in the kernel text code
+ * The following ifdef'ed code is a hack to work around this limitation
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,24)
+static int hk_patch_force;
+module_param(hk_patch_force, int, 0);
+MODULE_PARM_DESC(hk_patch_force, "Force patching even if the found default is not 1024");
+
+static unsigned long connector_max_msg_size_offset = 0x50;
+module_param(connector_max_msg_size_offset, ulong, 0);
+MODULE_PARM_DESC(connector_max_msg_size_offset, "The offset of the cmp $400, %ax (3d 00 04 00 00) instruction in cn_input");
+
+static unsigned long cn_input_addr;
+module_param(cn_input_addr, ulong, 0);
+MODULE_PARM_DESC(cn_input_addr, "The address of cn_input in the running kernel");
+
+static void __init hk_patch_hack(void)
+{
+	unsigned long *addr = (unsigned long *)(cn_input_addr + connector_max_msg_size_offset);
+	unsigned long new_max = 16 * 1024;
+
+	if (!cn_input_addr)
+		return;
+
+	if (*addr != 1024 && !hk_patch_force) {
+		printk("hk: addr value is not 1024 (it's %lu), use hk_patch_force=1 to patch anyway\n", *addr);
+		return;
+	}
+
+	memcpy(addr, &new_max, sizeof(new_max));
+
+	/* kprobes does that to sync the cpus */
+	sync_core();
+#if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,22)
+	if (cpu_has_clflush)
+		asm("clflush (%0) " :: "r" (addr) : "memory");
+#endif
+}
+#else
+static void __init hk_patch_hack(void)
+{
+	return;
+}
+#endif
 
 static int __init init(void)
 {
@@ -329,6 +367,7 @@ static int __init init(void)
 		printk("can't register out cn callback.\n");
 		goto err_cn2;
 	}
+	printk(KERN_INFO "Hook module loaded\n");
 
 	return 0;
 
@@ -348,6 +387,7 @@ static void __exit exit(void)
 	cn_del_callback(&cn_hook_in_id);
 	nf_unregister_hook(&nf_in_hook);
 	nf_unregister_hook(&nf_out_hook);
+	printk(KERN_INFO "Hook module unloaded\n");
 }
 
 module_init(init)

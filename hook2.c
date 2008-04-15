@@ -293,6 +293,14 @@ static ssize_t nh_write(struct file *file, const char __user *buf, size_t count,
 	} else {
 		/* TO_INTERFACE */
 		skb->dev = p->writer->dest_dev;
+		skb->protocol = be16_to_cpu(0x0800);
+		skb_pull(skb, sizeof(struct ethhdr));
+
+#if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,22)
+		skb_reset_network_header(skb);
+#endif
+		skb->protocol = __constant_htons(ETH_P_IP);
+
 		if (skb->dev->hard_header)
 			skb->dev->hard_header(skb, skb->dev, be16_to_cpu(skb->protocol), NULL, skb->dev->dev_addr, skb->len);
 		ret = dev_queue_xmit(skb);
@@ -320,6 +328,8 @@ static ssize_t nh_read(struct file *file, char __user *buf, size_t count, loff_t
 			return -ERESTARTSYS;
 
 	skb = skb_dequeue(&p->skb_queue);
+	skb_push(skb, ETH_HLEN);
+
 	if (!skb)
 		return -EIO;
 

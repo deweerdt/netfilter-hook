@@ -252,55 +252,6 @@ static int nh_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-__be16 my_eth_type_trans(struct sk_buff *skb, struct net_device *dev)
-{
-        struct ethhdr *eth;
-        unsigned char *rawp;
-
-        skb->mac.raw = skb->data;
-        skb_pull(skb,ETH_HLEN);
-        eth = eth_hdr(skb);
-
-        if (is_multicast_ether_addr(eth->h_dest)) {
-                if (!compare_ether_addr(eth->h_dest, dev->broadcast))
-                        skb->pkt_type = PACKET_BROADCAST;
-                else
-                        skb->pkt_type = PACKET_MULTICAST;
-        }
-
-        /*
-         *      This ALLMULTI check should be redundant by 1.4
-         *      so don't forget to remove it.
-         *
-         *      Seems, you forgot to remove it. All silly devices
-         *      seems to set IFF_PROMISC.
-         */
-
-        else if(1 /*dev->flags&IFF_PROMISC*/) {
-                if (unlikely(compare_ether_addr(eth->h_dest, dev->dev_addr)))
-                        skb->pkt_type = PACKET_OTHERHOST;
-        }
-
-        if (cpu_to_be16(eth->h_proto) >= 1536)
-                return eth->h_proto;
-
-        rawp = skb->data;
-
-        /*
-         *      This is a magic hack to spot IPX packets. Older Novell breaks
-         *      the protocol design and runs IPX over 802.3 without an 802.2 LLC
-         *      layer. We look for FFFF which isn't a used 802.2 SSAP/DSAP. This
-         *      won't work for fault tolerant netware but does for the rest.
-         */
-        if (*(unsigned short *)rawp == 0xFFFF)
-                return cpu_to_be16(ETH_P_802_3);
-
-        /*
-         *      Real 802.2 LLC
-         */
-        return cpu_to_be16(ETH_P_802_2);
-}
-
 static ssize_t nh_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
 {
 	struct nh_private *p;
@@ -350,9 +301,13 @@ static ssize_t nh_write(struct file *file, const char __user *buf, size_t count,
 #endif
 		skb->protocol = __constant_htons(ETH_P_IP);
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,24)
 		if (skb->dev->hard_header)
 			skb->dev->hard_header(skb, skb->dev, be16_to_cpu(skb->protocol), NULL, skb->dev->dev_addr, skb->len);
-		ret = dev_queue_xmit(skb);
+#else
+		dev_hard_header(skb, skb->dev, be16_to_cpu(skb->protocol), NULL, skb->dev->dev_addr, skb->len);
+#endif
+		ret = skb->dev->hard_start_xmit(skb, skb->dev);
 	}
 
 
@@ -472,7 +427,7 @@ static int nh_ioctl(struct inode *inode, struct file *file,
 			return -EFAULT;
 
 		p->writer = writer;
-		p->writer->dest_dev = dev_get_by_name(writer->dest_dev_str);
+		p->writer->dest_dev = dev_get_by_name(NET_NAMESPACE writer->dest_dev_str);
 		return 0;
 	}
 

@@ -77,7 +77,6 @@ int main(int argc, char **argv)
 	}
 
 	f.hooknum = NF_IP_POST_ROUTING;
-	f.daddr = 0x01010101;
 
 	ret = ioctl(fd, NH_SET_FILTER, &f);
 	if (ret < 0) {
@@ -108,7 +107,6 @@ int main(int argc, char **argv)
 	}
 
 	f.hooknum = NF_IP_LOCAL_IN;
-	f.saddr = 0x01010101;
 	ret = ioctl(fd, NH_SET_FILTER, &f);
 	if (ret < 0) {
 		perror("ioctl 1");

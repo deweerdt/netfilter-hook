@@ -17,4 +17,4 @@ all: user
 endif
 
 user: user.c hook.h
-	gcc $(CFLAGS) -Wall -o user user.c
+	gcc $(CFLAGS) -Wall -o user user.c -lpthread

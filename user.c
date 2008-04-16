@@ -6,6 +6,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <pthread.h>
+#include <signal.h>
 
 #include "hook.h"
 
@@ -20,13 +22,54 @@
 /* Packets about to hit the wire. */
 #define NF_IP_POST_ROUTING	4
 
+struct arg {
+	int fd;
+	int count;
+};
+static struct arg a1;
+static struct arg a2;
+void *net_pipe(void *arg)
+{
+	struct arg *a = arg;
+	int fd = a->fd;
+	char buf[4096];
+	int ret;
+	do {
+		ret = read(fd, buf, sizeof(buf));
+		if (ret < 0) {
+			perror("read");
+			exit(0);
+		}
+		ret = write(fd, buf, ret);
+		if (ret < 0) {
+			perror("write");
+			exit(0);
+		}
+		a->count++;
+	} while (ret > 0);
+	close(fd);
+	return NULL;
+}
+void sigint_handler(int arg)
+{
+	printf("t1 saw %d packets\n", a1.count);
+	printf("t2 saw %d packets\n", a2.count);
+	exit(0);
+}
 int main(int argc, char **argv)
 {
 	int fd, ret;
-	char buf[4096];
 	struct nh_filter f;
 	struct nh_writer w;
+	pthread_t t1, t2;
 
+	signal(SIGINT, sigint_handler);
+
+	/*
+	 * 1
+	 */
+	memset(&f, 0, sizeof(f));
+	memset(&w, 0, sizeof(w));
 	fd = open("/dev/nf_hook", O_RDWR);
 	if (fd < 0) {
 		perror("open");
@@ -34,7 +77,8 @@ int main(int argc, char **argv)
 	}
 
 	f.hooknum = NF_IP_POST_ROUTING;
-	f.saddr = 0xaaaaaaaa;
+	f.daddr = 0x01010101;
+
 	ret = ioctl(fd, NH_SET_FILTER, &f);
 	if (ret < 0) {
 		perror("ioctl 1");
@@ -48,21 +92,40 @@ int main(int argc, char **argv)
 		perror("ioctl 2");
 		exit(0);
 	}
-	perror("ioctl ?");
 
-	do {
-		ret = read(fd, buf, sizeof(buf));
-		if (ret < 0) {
-			perror("read");
-			exit(0);
-		}
-		dump_zone(buf, ret);
-		ret = write(fd, buf, ret);
-		if (ret < 0) {
-			perror("write");
-			exit(0);
-		}
-	} while (ret > 0);
-	close(fd);
+	a1.fd = fd;
+	pthread_create(&t1, NULL, net_pipe, &a1);
+
+	/*
+	 * 2
+	 */
+	memset(&f, 0, sizeof(f));
+	memset(&w, 0, sizeof(w));
+	fd = open("/dev/nf_hook", O_RDWR);
+	if (fd < 0) {
+		perror("open");
+		exit(0);
+	}
+
+	f.hooknum = NF_IP_LOCAL_IN;
+	f.saddr = 0x01010101;
+	ret = ioctl(fd, NH_SET_FILTER, &f);
+	if (ret < 0) {
+		perror("ioctl 1");
+		exit(0);
+	}
+
+	w.mode = TO_ROUTING_STACK;
+	strcpy(w.dest_dev_str, "eth0");
+	ret = ioctl(fd, NH_SET_WRITE_MODE, &w);
+	if (ret < 0) {
+		perror("ioctl 2");
+		exit(0);
+	}
+	a2.fd = fd;
+	pthread_create(&t2, NULL, net_pipe, &a2);
+
+	pthread_join(t2, NULL);
+	pthread_join(t1, NULL);
 	return 0;
 }

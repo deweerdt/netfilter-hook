@@ -8,6 +8,7 @@
 #include <linux/completion.h>
 #include <linux/netfilter_ipv4.h>
 #include <linux/miscdevice.h>
+#include <linux/etherdevice.h>
 
 #include <asm/uaccess.h>
 
@@ -23,29 +24,25 @@ struct skb_entry {
 	struct sk_buff *skb;
 };
 
+/*
+ * Must hold skb_list_lock
+ */
 static struct skb_entry *is_hooked(struct sk_buff *skb)
 {
 	struct skb_entry *e;
 	int found = 0;
-	spin_lock(&skb_list_lock);
 	list_for_each_entry(e, &current_skbs, list) {
 		if(e->skb == skb) {
 			found = 1;
 			break;
 		}
 	}
-	spin_unlock(&skb_list_lock);
 
 	return found ? e : NULL;
 }
-enum {
-	NH_READ = 1 << 0,
-	NH_WRITE = 1 << 1,
-	NH_INIT_DONE = 1 << 2,
-};
 
 static LIST_HEAD(nh_privs);
-static DEFINE_SPINLOCK(nh_privs_lock);
+static DEFINE_RWLOCK(nh_privs_lock);
 
 struct nh_private {
 	struct list_head list;
@@ -56,9 +53,7 @@ struct nh_private {
 
 };
 
-
-#define NF_IP_NUMHOOKS 5
-static struct nf_hook_ops *cb_in_use[NF_IP_NUMHOOKS];
+static struct nf_hook_ops *cb_in_use[NF_IP_NUMHOOKS + 1];
 
 enum {
 	CHECK_PROTO 	= (1 << 0),
@@ -70,6 +65,9 @@ enum {
 	CHECK_DPORT 	= (1 << 6),
 };
 
+/*
+ * Must held the nh_privs_lock
+ */
 static struct nh_private *pass(struct sk_buff *skb,
 				 const struct net_device *in,
 				 const struct net_device *out,
@@ -84,47 +82,41 @@ static struct nh_private *pass(struct sk_buff *skb,
 #endif
 	struct nh_private *e;
 
-	spin_lock(&nh_privs_lock);
-
 	list_for_each_entry(e, &nh_privs, list) {
 		if (e->filter->hooknum != hooknum) {
-			//printk("AZE 1\n");
 			continue;
 		}
-		if (e->filter->flags & CHECK_OUT && e->filter->out != out) {
-			//printk("AZE 2\n");
+		if ((e->filter->flags & CHECK_OUT) && e->filter->out != out) {
 			continue;
 		}
-		if (e->filter->flags & CHECK_IN && e->filter->in != in) {
-			//printk("AZE 3\n");
-			continue;
-		}
-		if (e->filter->flags & CHECK_PROTO && e->filter->proto != iph->protocol) {
-			//printk("AZE 4\n");
-			continue;
-		}
-		if (e->filter->flags & CHECK_SADDR && e->filter->saddr != iph->saddr) {
-			//printk("AZE 5\n");
-			continue;
-		}
-		if (e->filter->flags & CHECK_DADDR && e->filter->daddr != iph->daddr) {
-			//printk("AZE 6\n");
-			continue;
-		}
-		if (e->filter->flags & CHECK_SPORT && e->filter->sport != tph->source) {
-			//printk("AZE 7\n");
-			continue;
-		}
-		if (e->filter->flags & CHECK_DPORT && e->filter->dport != tph->dest) {
-			//printk("e->filter->dport %d != tph->dest %d \n", e->filter->dport, tph->dest);
+		if ((e->filter->flags & CHECK_IN) && e->filter->in != in) {
 			continue;
 		}
 
-		spin_unlock(&nh_privs_lock);
+		if (iph) {
+			if ((e->filter->flags & CHECK_PROTO) && e->filter->proto != iph->protocol) {
+				continue;
+			}
+			if ((e->filter->flags & CHECK_SADDR) && e->filter->saddr != iph->saddr) {
+				continue;
+			}
+			if ((e->filter->flags & CHECK_DADDR) && e->filter->daddr != iph->daddr) {
+				continue;
+			}
+		}
+
+		if (tph) {
+			if ((e->filter->flags & CHECK_SPORT) && e->filter->sport != tph->source) {
+				continue;
+			}
+			if ((e->filter->flags & CHECK_DPORT) && e->filter->dport != tph->dest) {
+				continue;
+			}
+		}
+
 		return e;
 	}
 
-	spin_unlock(&nh_privs_lock);
 	return NULL;
 }
 
@@ -144,32 +136,26 @@ static unsigned int nf_cb(
 	struct sk_buff **pskb = &skb;
 #endif
 
+	/* if the packet was hooked once, don't send it back to user space */
+	spin_lock_irq(&skb_list_lock);
 	e = is_hooked(*pskb);
-
 	if (e) {
-		spin_lock(&skb_list_lock);
 		list_del(&e->list);
-		spin_unlock(&skb_list_lock);
+		spin_unlock_irq(&skb_list_lock);
 		kfree(e);
 		return NF_ACCEPT;
 	}
+	spin_unlock_irq(&skb_list_lock);
 
+	read_lock_irq(&nh_privs_lock);
 	p = pass(*pskb, in, out, hooknum);
 	if (p) {
-		/* Save the dest mac now, it will be lost otherwise */
-#if 0
-		if ((*pskb)->dst && (*pskb)->dst->neighbour) {
-			skb_push((*pskb), sizeof(struct ethhdr));
-			eth = (struct ethhdr *)(*pskb)->data;
-			skb_pull((*pskb), sizeof(struct ethhdr));
-			memcpy(eth->h_dest, (*pskb)->dst->neighbour->ha, ETH_ALEN);
-		}
-#endif
-
 		skb_queue_tail(&p->skb_queue, *pskb);
 		complete(&p->completion);
+		read_unlock_irq(&nh_privs_lock);
 		return NF_STOLEN;
 	}
+	read_unlock_irq(&nh_privs_lock);
 	return NF_ACCEPT;
 }
 
@@ -185,6 +171,9 @@ int setup_filter(struct nh_private *p)
 	struct nh_filter *f = p->filter;
 	struct nf_hook_ops *nf_hook;
 	int ret = 0;
+
+	if (f->hooknum < 0 || f->hooknum > (NF_IP_NUMHOOKS - 1))
+		return -EINVAL;
 
 	nf_hook = kzalloc(sizeof(*nf_hook), GFP_KERNEL);
 	if (!nf_hook)
@@ -207,7 +196,7 @@ int setup_filter(struct nh_private *p)
 	if (f->proto)
 		f->flags |= CHECK_PROTO;
 
-	if (!cb_in_use[f->priority]) {
+	if (!cb_in_use[f->hooknum]) {
 		nf_hook->hook = nf_cb;
 		nf_hook->owner = THIS_MODULE;
 		nf_hook->pf = PF_INET;
@@ -216,9 +205,10 @@ int setup_filter(struct nh_private *p)
 		ret = nf_register_hook(nf_hook);
 		if (ret < 0) {
 			printk("nf_hook: can't register netfilter hook.\n");
+			kfree(nf_hook);
 			goto err;
 		}
-		cb_in_use[f->priority] = nf_hook;
+		cb_in_use[f->hooknum] = nf_hook;
 	}
 
 	return 0;
@@ -235,7 +225,7 @@ static int nh_open(struct inode *inode, struct file *file)
 	if (!p)
 		return -ENOMEM;
 
-	skb_queue_head_init(&p->skb_queue) ;
+	skb_queue_head_init(&p->skb_queue);
 	init_completion(&p->completion);
 	file->private_data = p;
 
@@ -246,14 +236,69 @@ static int nh_release(struct inode *inode, struct file *file)
 	struct nh_private *p = file->private_data;
 
 	if (p->filter) {
-		spin_lock(&nh_privs_lock);
+		write_lock_irq(&nh_privs_lock);
 		list_del(&p->list);
-		spin_unlock(&nh_privs_lock);
+		write_unlock_irq(&nh_privs_lock);
 		kfree(p->filter);
 	}
+	while (!skb_queue_empty(&p->skb_queue)) {
+		struct sk_buff *skb;
+		skb = skb_dequeue(&p->skb_queue);
+		kfree_skb(skb);
+	}
+
 	kfree(p->writer);
 	kfree(p);
 	return 0;
+}
+
+__be16 my_eth_type_trans(struct sk_buff *skb, struct net_device *dev)
+{
+        struct ethhdr *eth;
+        unsigned char *rawp;
+
+        skb->mac.raw = skb->data;
+        skb_pull(skb,ETH_HLEN);
+        eth = eth_hdr(skb);
+
+        if (is_multicast_ether_addr(eth->h_dest)) {
+                if (!compare_ether_addr(eth->h_dest, dev->broadcast))
+                        skb->pkt_type = PACKET_BROADCAST;
+                else
+                        skb->pkt_type = PACKET_MULTICAST;
+        }
+
+        /*
+         *      This ALLMULTI check should be redundant by 1.4
+         *      so don't forget to remove it.
+         *
+         *      Seems, you forgot to remove it. All silly devices
+         *      seems to set IFF_PROMISC.
+         */
+
+        else if(1 /*dev->flags&IFF_PROMISC*/) {
+                if (unlikely(compare_ether_addr(eth->h_dest, dev->dev_addr)))
+                        skb->pkt_type = PACKET_OTHERHOST;
+        }
+
+        if (cpu_to_be16(eth->h_proto) >= 1536)
+                return eth->h_proto;
+
+        rawp = skb->data;
+
+        /*
+         *      This is a magic hack to spot IPX packets. Older Novell breaks
+         *      the protocol design and runs IPX over 802.3 without an 802.2 LLC
+         *      layer. We look for FFFF which isn't a used 802.2 SSAP/DSAP. This
+         *      won't work for fault tolerant netware but does for the rest.
+         */
+        if (*(unsigned short *)rawp == 0xFFFF)
+                return cpu_to_be16(ETH_P_802_3);
+
+        /*
+         *      Real 802.2 LLC
+         */
+        return cpu_to_be16(ETH_P_802_2);
 }
 
 static ssize_t nh_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
@@ -265,19 +310,19 @@ static ssize_t nh_write(struct file *file, const char __user *buf, size_t count,
 	p = file->private_data;
 
 	if (!p->writer) {
-		printk("p->writer %p %p\n", p->filter, p->writer);
 		return -EBADF;
 	}
 
-	skb = dev_alloc_skb(count);
+	skb = dev_alloc_skb(count + 2);
 	if (!skb)
 		return -ENOMEM;
 
-	if (copy_from_user(skb->data, buf, count)) {
+	skb_reserve(skb, 2);
+
+	if (copy_from_user(skb_put(skb, count), buf, count)) {
 		kfree_skb(skb);
 		return -EFAULT;
 	}
-	skb_put(skb, count);
 
 	if (p->writer->mode == TO_ROUTING_STACK) {
 		struct skb_entry *e;
@@ -286,9 +331,13 @@ static ssize_t nh_write(struct file *file, const char __user *buf, size_t count,
 			return NF_DROP;
 		e->skb = skb;
 
-		spin_lock(&skb_list_lock);
+		spin_lock_irq(&skb_list_lock);
 		list_add(&e->list, &current_skbs);
-		spin_unlock(&skb_list_lock);
+		spin_unlock_irq(&skb_list_lock);
+
+		skb->dev = p->writer->dest_dev; /* needed for <= 2.6.18 */
+		skb->protocol = eth_type_trans(skb, p->writer->dest_dev);
+
 		ret = netif_rx(skb);
 	} else {
 		/* TO_INTERFACE */
@@ -304,7 +353,6 @@ static ssize_t nh_write(struct file *file, const char __user *buf, size_t count,
 		if (skb->dev->hard_header)
 			skb->dev->hard_header(skb, skb->dev, be16_to_cpu(skb->protocol), NULL, skb->dev->dev_addr, skb->len);
 		ret = dev_queue_xmit(skb);
-		printk("ret is %d\n", ret);
 	}
 
 
@@ -323,11 +371,23 @@ static ssize_t nh_read(struct file *file, char __user *buf, size_t count, loff_t
 		return -EBADF;
 	}
 
+wait_skb:
 	if(skb_queue_empty(&p->skb_queue))
 		if (wait_for_completion_interruptible(&p->completion))
 			return -ERESTARTSYS;
 
 	skb = skb_dequeue(&p->skb_queue);
+	if (!skb)
+		goto wait_skb;
+
+	/* Save the dest mac now, it will be lost otherwise */
+	if (skb->dst && skb->dst->neighbour) {
+		struct ethhdr *eth;
+		skb_push(skb, sizeof(struct ethhdr));
+		eth = (struct ethhdr *)skb->data;
+		skb_pull(skb, sizeof(struct ethhdr));
+		memcpy(eth->h_dest, skb->dst->neighbour->ha, ETH_ALEN);
+	}
 	skb_push(skb, ETH_HLEN);
 
 	if (!skb)
@@ -373,8 +433,8 @@ static int nh_ioctl(struct inode *inode, struct file *file,
 #if 0
 		printk("Got filter:\n\
 				u8 proto = %d\n\
-				u32 saddr = %d\n\
-				u32 daddr = %d\n\
+				u32 saddr = %ld\n\
+				u32 daddr = %ld\n\
 				u16 dport = %d\n\
 				u16 sport = %d\n\
 				char in_dev[255] = %s\n\
@@ -386,18 +446,20 @@ static int nh_ioctl(struct inode *inode, struct file *file,
 #endif
 
 		if (!ret) {
-			spin_lock(&nh_privs_lock);
+			write_lock_irq(&nh_privs_lock);
 			list_add(&p->list, &nh_privs);
-			spin_unlock(&nh_privs_lock);
+			write_unlock_irq(&nh_privs_lock);
+		} else {
+			kfree(p->filter);
 		}
 
 
 		return ret;
 	case NH_RM_FILTER:
 		if (p->filter) {
-			spin_lock(&nh_privs_lock);
+			write_lock_irq(&nh_privs_lock);
 			list_del(&p->list);
-			spin_unlock(&nh_privs_lock);
+			write_unlock_irq(&nh_privs_lock);
 			kfree(p->filter);
 		}
 		return 0;
@@ -411,7 +473,6 @@ static int nh_ioctl(struct inode *inode, struct file *file,
 
 		p->writer = writer;
 		p->writer->dest_dev = dev_get_by_name(writer->dest_dev_str);
-		printk("OK\n");
 		return 0;
 	}
 
@@ -441,6 +502,8 @@ static int __init nh_init(void)
 	ret = misc_register(&net_hook_dev);
 	if (ret)
 		printk(KERN_ERR "net_hook: can't misc_register on minor %d\n", NH_MINOR);
+
+	printk("hk: module loaded\n");
 	return ret;
 }
 module_init(nh_init);
@@ -455,6 +518,7 @@ static void __exit nh_exit(void)
 		}
 	}
 	misc_deregister(&net_hook_dev);
+	printk("hk: module unloaded\n");
 }
 module_exit(nh_exit);
 

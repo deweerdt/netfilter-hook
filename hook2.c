@@ -272,14 +272,17 @@ static ssize_t nh_write(struct file *file, const char __user *buf, size_t count,
 
 	if (copy_from_user(skb_put(skb, count), buf, count)) {
 		kfree_skb(skb);
+		printk("nh_write: failed copy_from_user %d\n", count);
 		return -EFAULT;
 	}
 
 	if (p->writer->mode == TO_ROUTING_STACK) {
 		struct skb_entry *e;
 	        e = kmalloc(sizeof(*e), GFP_ATOMIC);
-		if (!e)
-			return NF_DROP;
+		if (!e) {
+			kfree_skb(skb);
+			return -ENOMEM;
+		}
 		e->skb = skb;
 
 		spin_lock_irq(&skb_list_lock);
@@ -320,6 +323,9 @@ static ssize_t nh_read(struct file *file, char __user *buf, size_t count, loff_t
 	struct sk_buff *skb;
 	int ret;
 
+	if (!count)
+		return count;
+
 	p = file->private_data;
 
 	if (!p->filter) {
@@ -345,21 +351,20 @@ wait_skb:
 	}
 	skb_push(skb, ETH_HLEN);
 
-	if (!skb)
-		return -EIO;
-
 	if (skb->len > count) {
+		kfree_skb(skb);
 		return -EINVAL;
 	}
 
 	ret = skb->len;
 	if (copy_to_user(buf, skb->data, skb->len)) {
+		printk("failed copy_to_user %d\n", skb->len);
 		kfree_skb(skb);
 		return -EFAULT;
 	}
 	kfree_skb(skb);
 
-	return skb->len;
+	return ret;
 }
 
 static int nh_ioctl(struct inode *inode, struct file *file,
@@ -378,8 +383,9 @@ static int nh_ioctl(struct inode *inode, struct file *file,
 		if (!filter)
 			return -ENOMEM;
 
-		if (copy_from_user(filter, (void *)pointer, sizeof(*filter)))
+		if (copy_from_user(filter, (void *)pointer, sizeof(*filter))) {
 			return -EFAULT;
+		}
 
 
 		p->filter = filter;

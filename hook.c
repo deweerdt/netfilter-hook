@@ -1,35 +1,21 @@
+#include <linux/fs.h>
 #include <linux/ip.h>
-#include <linux/wait.h>
+#include <linux/tcp.h>
 #include <linux/module.h>
-#include <linux/kernel.h>
-#include <linux/kthread.h>
-#include <linux/connector.h>
-#include <linux/netfilter.h>
-#include <linux/if_ether.h>
-#include <linux/etherdevice.h>
-#include <linux/netfilter_ipv4.h>
 #include <linux/version.h>
+#include <linux/netdevice.h>
+#include <linux/netfilter.h>
+#include <linux/completion.h>
+#include <linux/netfilter_ipv4.h>
+#include <linux/miscdevice.h>
+#include <linux/etherdevice.h>
 
-#include <net/ip.h>
-#include <net/sock.h>
+#include <asm/uaccess.h>
 
 #include "hook.h"
 
-#define IN_DEV 			"eth0"
-#define OUT_DEV 		"eth0"
+#define NH_MINOR 214
 
-#define DEBUG 1
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,24)
-#define NET_NAMESPACE
-#else
-#define NET_NAMESPACE &init_net,
-#endif
-
-static struct net_device *in_dev;
-static struct net_device *out_dev;
-static struct cb_id cn_hook_in_id 	= { .idx = HOOK_IN_ID, .val = HOOK_ID_VAL };
-static struct cb_id cn_hook_out_id 	= { .idx = HOOK_OUT_ID, .val = HOOK_ID_VAL };
 
 static LIST_HEAD(current_skbs);
 static DEFINE_SPINLOCK(skb_list_lock);
@@ -38,358 +24,462 @@ struct skb_entry {
 	struct sk_buff *skb;
 };
 
+/*
+ * Must hold skb_list_lock
+ */
 static struct skb_entry *is_hooked(struct sk_buff *skb)
 {
 	struct skb_entry *e;
 	int found = 0;
-	spin_lock(&skb_list_lock);
 	list_for_each_entry(e, &current_skbs, list) {
 		if(e->skb == skb) {
 			found = 1;
 			break;
 		}
 	}
-	spin_unlock(&skb_list_lock);
 
 	return found ? e : NULL;
 }
-static void uspace_to_in(void *arg)
-{
-	struct cn_msg *m = arg;
-	struct sk_buff *skb;
-	int ret;
-	int size;
 
-#ifdef DEBUG
-	printk("%s\n", __FUNCTION__);
-	dump_zone(m->data, m->len);
-#endif
+static LIST_HEAD(nh_privs);
+static DEFINE_RWLOCK(nh_privs_lock);
 
-	size = m->len + 2;
-	skb = dev_alloc_skb(size);
-	if (!skb) {
-		printk("%s: cannot allocate: %d bytes\n", __FUNCTION__, size);
-		return;
-	}
+struct nh_private {
+	struct list_head list;
+	struct nh_filter *filter;
+	struct nh_writer *writer;
+	struct completion completion;
+	struct sk_buff_head skb_queue ;
 
-	skb_reserve(skb, 2);
-
-         /* copy the data into the sk_buff */
-	memcpy(skb->data, m->data, m->len);
-	skb_put(skb, m->len);
-
-        skb->protocol = eth_type_trans(skb, in_dev);
-#ifdef DEBUG
-	printk("%s: skb %p, skb->cb is %p\n", __FUNCTION__, skb, skb->cb);
-	dump_zone(skb->cb, sizeof(skb->cb));
-#endif
-	ret = netif_rx(skb);
-
-	return;
-}
-
-static void uspace_to_out(void *arg)
-{
-	struct cn_msg *m = arg;
-	struct sk_buff *skb;
-	int ret;
-	int size;
-
-#ifdef DEBUG
-	printk("%s\n", __FUNCTION__);
-	dump_zone(m->data, m->len);
-	printk("packet len to out is %d\n", m->len);
-#endif
-
-	skb = dev_alloc_skb(size);
-	if (!skb) {
-		printk("%s: cannot allocate: %d bytes\n", __FUNCTION__, size);
-		return;
-	}
-
-
-	skb_reserve(skb, 2);
-
-         /* copy the data into the sk_buff */
-	memcpy(skb->data, m->data, m->len);
-	skb_put(skb, m->len);
-        skb->protocol = ((struct ethhdr *)skb->data)->h_proto;
-	skb_pull(skb, sizeof(struct ethhdr));
-
-#if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,22)
-	skb_reset_network_header(skb);
-#endif
-
-        skb->protocol = __constant_htons(ETH_P_IP);
-	skb->dev = out_dev;
-	if (out_dev->hard_header) {
-		/*
-		 * We can pass NULL as dest mac header, because this was set
-		 * when sent to user space (see nf_out)
-		 */
-		out_dev->hard_header(skb, out_dev, be16_to_cpu(skb->protocol), NULL, out_dev->dev_addr, skb->len);
-	}
-#if 0
-	/* This is a quick hack for 2.6.16 */
-	{
-		/* TODO obtain next hop from the cli */
-		unsigned char out_addr[] = { 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 };
-		memcpy(skb->data + sizeof(out_addr), out_addr, sizeof(out_addr));
-	}
-#endif
-
-
-	ret = dev_queue_xmit(skb);
-
-	return;
-}
-
-static int send_to_uspace(struct sk_buff *skb, struct cb_id *id)
-{
-	struct cn_msg *m;
-	int ret = 0;
-
-	/* get back to the eth header */
-	skb_push(skb, sizeof(struct ethhdr));
-
-	m = kzalloc(sizeof(*m) + skb->len, gfp_any());
-	if (!m) {
-		printk("cannot allocate %d bytes\n", skb->len + sizeof(*m));
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	memcpy(&m->id, id, sizeof(m->id));
-	m->seq = 0;
-	m->len = skb->len;
-
-	memcpy(m->data, skb->data, skb->len);
-
-	ret = cn_netlink_send(m, 0, gfp_any());
-
-	kfree(m);
-out:
-	return ret;
-}
-
-#define TEST_IP 1
-#ifdef TEST_IP
-static unsigned int test_ip = 0x0a7a507b; /* 10.122.80.123 */
-/* static unsigned int test_ip = 0xd41b300a; */ /* 212.27.48.10 */
-/* static unsigned int test_ip = 0xc0a80101; */ /* 192.168.1.1 */
-/* static unsigned int test_ip = 0x55171fac; */ /* 172.31.23.85 */
-/* static unsigned int test_ip = 0x04040404; */ /* 4.4.4.4 */
-#endif
-
-static unsigned int
-nf_in(unsigned int hooknum, struct sk_buff **pskb,
-	 const struct net_device *in, const struct net_device *out,
-	 int (*okfn)(struct sk_buff *))
-{
-	int ret;
-	struct skb_entry *e;
-#ifdef TEST_IP
-#  if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,22)
-	struct iphdr *iph = (struct iphdr *)skb_network_header(*pskb);
-#  else
-	struct iphdr *iph = (struct iphdr *)(*pskb)->nh.raw;
-#  endif
-#endif
-
-	e = is_hooked(*pskb);
-	if (!e
-#ifdef TEST_IP
-		&& (iph->daddr == be32_to_cpu(test_ip) || iph->saddr == be32_to_cpu(test_ip))
-#endif
-	) {
-	        e = kmalloc(sizeof(*e), GFP_ATOMIC);
-		if (!e)
-			return NF_DROP;
-		e->skb = *pskb;
-
-		spin_lock(&skb_list_lock);
-		list_add(&e->list, &current_skbs);
-		spin_unlock(&skb_list_lock);
-
-		ret = send_to_uspace(*pskb, &cn_hook_in_id);
-		kfree_skb(*pskb);
-#ifdef DEBUG
-		printk("stolen: %s\n", __FUNCTION__);
-		printk("%s: skb %p, skb->cb is %p\n", __FUNCTION__, (*pskb), (*pskb)->cb);
-		dump_zone((*pskb)->cb, sizeof((*pskb)->cb));
-#endif
-		return NF_STOLEN;
-	}
-	if (e) {
-		spin_lock(&skb_list_lock);
-		list_del(&e->list);
-		spin_unlock(&skb_list_lock);
-		kfree(e);
-	}
-	return NF_ACCEPT;
-}
-
-static unsigned int
-nf_out(unsigned int hooknum, struct sk_buff **pskb,
-	 const struct net_device *in, const struct net_device *out,
-	 int (*okfn)(struct sk_buff *))
-{
-	int ret;
-	struct ethhdr *eth;
-#ifdef TEST_IP
-#  if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,22)
-	struct iphdr *iph = (struct iphdr *)skb_network_header(*pskb);
-#  else
-	struct iphdr *iph = (struct iphdr *)(*pskb)->nh.raw;
-#  endif
-#endif
-	//printk("nf_out: 0x%x -> 0x%x\n", iph->saddr, iph->daddr);
-
-	if (!is_hooked(*pskb)
-#ifdef TEST_IP
-		&& (iph->daddr == be32_to_cpu(test_ip) || iph->saddr == be32_to_cpu(test_ip))
-#endif
-	) {
-		/* Save the dest mac now, it will be lost otherwise */
-		if ((*pskb)->dst && (*pskb)->dst->neighbour) {
-			skb_push((*pskb), sizeof(struct ethhdr));
-			eth = (struct ethhdr *)(*pskb)->data;
-			skb_pull((*pskb), sizeof(struct ethhdr));
-			memcpy(eth->h_dest, (*pskb)->dst->neighbour->ha, ETH_ALEN);
-		}
-
-		ret = send_to_uspace(*pskb, &cn_hook_out_id);
-		kfree_skb(*pskb);
-#ifdef DEBUG
-		printk("stolen: %s\n", __FUNCTION__);
-#endif
-		return NF_STOLEN;
-	}
-	return NF_ACCEPT;
-}
-
-static struct nf_hook_ops nf_in_hook = {
-	.hook		= nf_in,
-	.owner		= THIS_MODULE,
-	.pf		= PF_INET,
-	.hooknum        = NF_IP_PRE_ROUTING,
-	.priority       = NF_IP_PRI_FIRST,
 };
 
-static struct nf_hook_ops nf_out_hook = {
-	.hook		= nf_out,
-	.owner		= THIS_MODULE,
-	.pf		= PF_INET,
-	.hooknum        = NF_IP_POST_ROUTING,
-	/*
-	 * We are last, because we want all the routing process to be
-	 * made as normal before (maybe) stealing the packet
-	 */
-	.priority       = NF_IP_PRI_LAST,
+static struct nf_hook_ops *cb_in_use[NF_IP_NUMHOOKS + 1];
+
+enum {
+	CHECK_PROTO 	= (1 << 0),
+	CHECK_OUT 	= (1 << 1),
+	CHECK_IN 	= (1 << 2),
+	CHECK_SADDR 	= (1 << 3),
+	CHECK_DADDR 	= (1 << 4),
+	CHECK_SPORT 	= (1 << 5),
+	CHECK_DPORT 	= (1 << 6),
 };
 
 /*
- * Up to linux 2.6.24, the CONNECTOR_MAX_MSG_SIZE was limited to 1024, this
- * function patches the sole location of the check in the kernel text code
- * The following ifdef'ed code is a hack to work around this limitation
+ * Must held the nh_privs_lock
  */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,24)
-static int hk_patch_force;
-module_param(hk_patch_force, int, 0);
-MODULE_PARM_DESC(hk_patch_force, "Force patching even if the found default is not 1024");
-
-static unsigned long connector_max_msg_size_offset = 0x50;
-module_param(connector_max_msg_size_offset, ulong, 0);
-MODULE_PARM_DESC(connector_max_msg_size_offset, "The offset of the cmp $400, %ax (3d 00 04 00 00) instruction in cn_input");
-
-static unsigned long cn_input_addr;
-module_param(cn_input_addr, ulong, 0);
-MODULE_PARM_DESC(cn_input_addr, "The address of cn_input in the running kernel");
-
-static void __init hk_patch_hack(void)
+static struct nh_private *pass(struct sk_buff *skb,
+				 const struct net_device *in,
+				 const struct net_device *out,
+				 int hooknum)
 {
-	unsigned long *addr = (unsigned long *)(cn_input_addr + connector_max_msg_size_offset);
-	unsigned long new_max = 16 * 1024;
-
-	if (!cn_input_addr)
-		return;
-
-	if (*addr != 1024 && !hk_patch_force) {
-		printk("hk: addr value is not 1024 (it's %lu), use hk_patch_force=1 to patch anyway\n", *addr);
-		return;
-	}
-
-	memcpy(addr, &new_max, sizeof(new_max));
-
-	/* kprobes does that to sync the cpus */
-	sync_core();
 #if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,22)
-	if (cpu_has_clflush)
-		asm("clflush (%0) " :: "r" (addr) : "memory");
-#endif
-}
+	struct iphdr *iph = (struct iphdr *)skb_network_header(skb);
+	struct tcphdr *tph = (struct tcphdr *)skb_transport_header(skb);
 #else
-static void __init hk_patch_hack(void)
-{
-	return;
+	struct iphdr *iph = skb->nh.iph;
+	struct tcphdr *tph = skb->h.th;
+#endif
+	struct nh_private *e;
+
+	list_for_each_entry(e, &nh_privs, list) {
+		if (e->filter->hooknum != hooknum) {
+			continue;
+		}
+		if ((e->filter->flags & CHECK_OUT) && e->filter->out != out) {
+			continue;
+		}
+		if ((e->filter->flags & CHECK_IN) && e->filter->in != in) {
+			continue;
+		}
+
+		if (iph) {
+			if ((e->filter->flags & CHECK_PROTO) && e->filter->proto != iph->protocol) {
+				continue;
+			}
+			if ((e->filter->flags & CHECK_SADDR) && e->filter->saddr != iph->saddr) {
+				continue;
+			}
+			if ((e->filter->flags & CHECK_DADDR) && e->filter->daddr != iph->daddr) {
+				continue;
+			}
+		}
+
+		if (tph) {
+			if ((e->filter->flags & CHECK_SPORT) && e->filter->sport != tph->source) {
+				continue;
+			}
+			if ((e->filter->flags & CHECK_DPORT) && e->filter->dport != tph->dest) {
+				continue;
+			}
+		}
+
+		return e;
+	}
+
+	return NULL;
 }
+
+static unsigned int nf_cb(
+		unsigned int hooknum,
+#if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,23)
+		struct sk_buff *skb,
+#else
+		struct sk_buff **pskb,
+#endif
+		const struct net_device *in, const struct net_device *out,
+		int (*okfn)(struct sk_buff *))
+{
+	struct nh_private *p;
+	struct skb_entry *e;
+#if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,23)
+	struct sk_buff **pskb = &skb;
 #endif
 
-static int __init init(void)
+	/* if the packet was hooked once, don't send it back to user space */
+	spin_lock_irq(&skb_list_lock);
+	e = is_hooked(*pskb);
+	if (e) {
+		list_del(&e->list);
+		spin_unlock_irq(&skb_list_lock);
+		kfree(e);
+		return NF_ACCEPT;
+	}
+	spin_unlock_irq(&skb_list_lock);
+
+	read_lock_irq(&nh_privs_lock);
+	p = pass(*pskb, in, out, hooknum);
+	if (p) {
+		skb_queue_tail(&p->skb_queue, *pskb);
+		complete(&p->completion);
+		read_unlock_irq(&nh_privs_lock);
+		return NF_STOLEN;
+	}
+	read_unlock_irq(&nh_privs_lock);
+	return NF_ACCEPT;
+}
+
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,24)
+#define NET_NAMESPACE
+#else
+#define NET_NAMESPACE &init_net,
+#endif
+
+int setup_filter(struct nh_private *p)
 {
-	int ret;
+	struct nh_filter *f = p->filter;
+	struct nf_hook_ops *nf_hook;
+	int ret = 0;
 
-	hk_patch_hack();
+	if (f->hooknum < 0 || f->hooknum > (NF_IP_NUMHOOKS - 1))
+		return -EINVAL;
 
-	in_dev = dev_get_by_name(NET_NAMESPACE IN_DEV);
-	out_dev = dev_get_by_name(NET_NAMESPACE OUT_DEV);
+	nf_hook = kzalloc(sizeof(*nf_hook), GFP_KERNEL);
+	if (!nf_hook)
+		return -ENOMEM;
 
-	ret = nf_register_hook(&nf_in_hook);
-	if (ret < 0) {
-		printk("can't register nf_in hook.\n");
-		goto err1;
+	f->in = dev_get_by_name(NET_NAMESPACE f->in_dev);
+	if (f->in)
+		f->flags |= CHECK_IN;
+	f->out = dev_get_by_name(NET_NAMESPACE f->out_dev);
+	if (f->out)
+	       f->flags |= CHECK_OUT;
+	if (f->saddr)
+	       f->flags |= CHECK_SADDR;
+	if (f->daddr)
+	       f->flags |= CHECK_DADDR;
+	if (f->dport)
+	       f->flags |= CHECK_DPORT;
+	if (f->sport)
+	       f->flags |= CHECK_SPORT;
+	if (f->proto)
+		f->flags |= CHECK_PROTO;
+
+	if (!cb_in_use[f->hooknum]) {
+		nf_hook->hook = nf_cb;
+		nf_hook->owner = THIS_MODULE;
+		nf_hook->pf = PF_INET;
+		nf_hook->hooknum = f->hooknum;
+		nf_hook->priority = f->priority;
+		ret = nf_register_hook(nf_hook);
+		if (ret < 0) {
+			printk("nf_hook: can't register netfilter hook.\n");
+			kfree(nf_hook);
+			goto err;
+		}
+		cb_in_use[f->hooknum] = nf_hook;
 	}
-
-	ret = nf_register_hook(&nf_out_hook);
-	if (ret < 0) {
-		printk("can't register nf_out hook.\n");
-		goto err2;
-	}
-
-	ret = cn_add_callback(&cn_hook_in_id, "uspace_to_in", uspace_to_in);
-	if (ret) {
-		printk("can't register in cn callback.\n");
-		goto err_cn;
-	}
-
-	ret = cn_add_callback(&cn_hook_out_id, "uspace_to_out", uspace_to_out);
-	if (ret) {
-		printk("can't register out cn callback.\n");
-		goto err_cn2;
-	}
-	printk(KERN_INFO "Hook module loaded\n");
 
 	return 0;
-
-err_cn2:
-	cn_del_callback(&cn_hook_in_id);
-err_cn:
-	nf_unregister_hook(&nf_out_hook);
-err2:
-	nf_unregister_hook(&nf_in_hook);
-err1:
+err:
+	kfree(nf_hook);
 	return ret;
 }
 
-static void __exit exit(void)
+static int nh_open(struct inode *inode, struct file *file)
 {
-	cn_del_callback(&cn_hook_out_id);
-	cn_del_callback(&cn_hook_in_id);
-	nf_unregister_hook(&nf_in_hook);
-	nf_unregister_hook(&nf_out_hook);
-	printk(KERN_INFO "Hook module unloaded\n");
+	struct nh_private *p;
+
+	p = kzalloc(sizeof(*p), GFP_KERNEL);
+	if (!p)
+		return -ENOMEM;
+
+	skb_queue_head_init(&p->skb_queue);
+	init_completion(&p->completion);
+	file->private_data = p;
+
+	return 0;
+}
+static int nh_release(struct inode *inode, struct file *file)
+{
+	struct nh_private *p = file->private_data;
+
+	if (p->filter) {
+		write_lock_irq(&nh_privs_lock);
+		list_del(&p->list);
+		write_unlock_irq(&nh_privs_lock);
+		kfree(p->filter);
+	}
+	while (!skb_queue_empty(&p->skb_queue)) {
+		struct sk_buff *skb;
+		skb = skb_dequeue(&p->skb_queue);
+		kfree_skb(skb);
+	}
+
+	kfree(p->writer);
+	kfree(p);
+	return 0;
 }
 
-module_init(init)
-module_exit(exit)
-MODULE_LICENSE("GPL");
+static ssize_t nh_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
+{
+	struct nh_private *p;
+	struct sk_buff *skb;
+	int ret;
+
+	p = file->private_data;
+
+	if (!p->writer) {
+		return -EBADF;
+	}
+
+	skb = dev_alloc_skb(count + 2);
+	if (!skb)
+		return -ENOMEM;
+
+	skb_reserve(skb, 2);
+
+	if (copy_from_user(skb_put(skb, count), buf, count)) {
+		kfree_skb(skb);
+		printk("nh_write: failed copy_from_user %d\n", count);
+		return -EFAULT;
+	}
+
+	if (p->writer->mode == TO_ROUTING_STACK) {
+		struct skb_entry *e;
+	        e = kmalloc(sizeof(*e), GFP_ATOMIC);
+		if (!e) {
+			kfree_skb(skb);
+			return -ENOMEM;
+		}
+		e->skb = skb;
+
+		spin_lock_irq(&skb_list_lock);
+		list_add(&e->list, &current_skbs);
+		spin_unlock_irq(&skb_list_lock);
+
+		skb->dev = p->writer->dest_dev; /* needed for <= 2.6.18 */
+		skb->protocol = eth_type_trans(skb, p->writer->dest_dev);
+
+		ret = netif_rx(skb);
+	} else {
+		/* TO_INTERFACE */
+		skb->dev = p->writer->dest_dev;
+		skb->protocol = be16_to_cpu(0x0800);
+		skb_pull(skb, sizeof(struct ethhdr));
+
+#if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,22)
+		skb_reset_network_header(skb);
+#endif
+		skb->protocol = __constant_htons(ETH_P_IP);
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,24)
+		if (skb->dev->hard_header)
+			skb->dev->hard_header(skb, skb->dev, be16_to_cpu(skb->protocol), NULL, skb->dev->dev_addr, skb->len);
+#else
+		dev_hard_header(skb, skb->dev, be16_to_cpu(skb->protocol), NULL, skb->dev->dev_addr, skb->len);
+#endif
+		ret = skb->dev->hard_start_xmit(skb, skb->dev);
+	}
+
+
+	return count;
+}
+
+static ssize_t nh_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
+{
+	struct nh_private *p;
+	struct sk_buff *skb;
+	int ret;
+
+	if (!count)
+		return count;
+
+	p = file->private_data;
+
+	if (!p->filter) {
+		return -EBADF;
+	}
+
+wait_skb:
+	if(skb_queue_empty(&p->skb_queue))
+		if (wait_for_completion_interruptible(&p->completion))
+			return -ERESTARTSYS;
+
+	skb = skb_dequeue(&p->skb_queue);
+	if (!skb)
+		goto wait_skb;
+
+	/* Save the dest mac now, it will be lost otherwise */
+	if (skb->dst && skb->dst->neighbour) {
+		struct ethhdr *eth;
+		skb_push(skb, sizeof(struct ethhdr));
+		eth = (struct ethhdr *)skb->data;
+		skb_pull(skb, sizeof(struct ethhdr));
+		memcpy(eth->h_dest, skb->dst->neighbour->ha, ETH_ALEN);
+	}
+	skb_push(skb, ETH_HLEN);
+
+	if (skb->len > count) {
+		kfree_skb(skb);
+		return -EINVAL;
+	}
+
+	ret = skb->len;
+	if (copy_to_user(buf, skb->data, skb->len)) {
+		printk("failed copy_to_user %d\n", skb->len);
+		kfree_skb(skb);
+		return -EFAULT;
+	}
+	kfree_skb(skb);
+
+	return ret;
+}
+
+static int nh_ioctl(struct inode *inode, struct file *file,
+		    unsigned int req, unsigned long pointer)
+{
+	struct nh_private *p;
+	struct nh_filter *filter;
+	struct nh_writer *writer;
+	int ret;
+
+	p = file->private_data;
+
+	switch (req) {
+	case NH_SET_FILTER:
+		filter = kzalloc(sizeof(*filter), GFP_KERNEL);
+		if (!filter)
+			return -ENOMEM;
+
+		if (copy_from_user(filter, (void *)pointer, sizeof(*filter))) {
+			return -EFAULT;
+		}
+
+
+		p->filter = filter;
+		ret = setup_filter(p);
+
+#if 0
+		printk("Got filter:\n\
+				u8 proto = %d\n\
+				u32 saddr = %ld\n\
+				u32 daddr = %ld\n\
+				u16 dport = %d\n\
+				u16 sport = %d\n\
+				char in_dev[255] = %s\n\
+				char out_dev[255] = %s\n\
+				int priority = %d\n\
+				int hooknum = %d\n\
+				int flags = %d\n", filter->proto, filter->saddr, filter->daddr, filter->dport, filter->sport,
+						   filter->in_dev, filter->out_dev, filter->priority, filter->hooknum, filter->flags);
+#endif
+
+		if (!ret) {
+			write_lock_irq(&nh_privs_lock);
+			list_add(&p->list, &nh_privs);
+			write_unlock_irq(&nh_privs_lock);
+		} else {
+			kfree(p->filter);
+		}
+
+
+		return ret;
+	case NH_RM_FILTER:
+		if (p->filter) {
+			write_lock_irq(&nh_privs_lock);
+			list_del(&p->list);
+			write_unlock_irq(&nh_privs_lock);
+			kfree(p->filter);
+		}
+		return 0;
+	case NH_SET_WRITE_MODE:
+		writer = kzalloc(sizeof(*writer), GFP_KERNEL);
+		if (!writer)
+			return -ENOMEM;
+
+		if (copy_from_user(writer, (void *)pointer, sizeof(*writer)))
+			return -EFAULT;
+
+		p->writer = writer;
+		p->writer->dest_dev = dev_get_by_name(NET_NAMESPACE writer->dest_dev_str);
+		return 0;
+	}
+
+	return -EINVAL;
+}
+
+static const struct file_operations net_hook_fops = {
+	.owner		= THIS_MODULE,
+	.open		= nh_open,
+	.release	= nh_release,
+	.ioctl		= nh_ioctl,
+	.read		= nh_read,
+	.write		= nh_write,
+};
+
+
+static struct miscdevice net_hook_dev = {
+	NH_MINOR,
+	"net_hook",
+	&net_hook_fops
+};
+
+static int __init nh_init(void)
+{
+	int ret;
+
+	ret = misc_register(&net_hook_dev);
+	if (ret)
+		printk(KERN_ERR "net_hook: can't misc_register on minor %d\n", NH_MINOR);
+
+	printk("hk: module loaded\n");
+	return ret;
+}
+module_init(nh_init);
+
+static void __exit nh_exit(void)
+{
+	int i;
+	for (i = 0; i < ARRAY_SIZE(cb_in_use); i++) {
+		if (cb_in_use[i]) {
+			nf_unregister_hook(cb_in_use[i]);
+			kfree(cb_in_use[i]);
+		}
+	}
+	misc_deregister(&net_hook_dev);
+	printk("hk: module unloaded\n");
+}
+module_exit(nh_exit);
+

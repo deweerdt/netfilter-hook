@@ -3,10 +3,10 @@
 #include <linux/tcp.h>
 #include <linux/module.h>
 #include <linux/version.h>
-#include <linux/netdevice.h>
 #include <linux/netfilter.h>
 #include <linux/completion.h>
 #include <linux/netfilter_ipv4.h>
+#include <linux/netdevice.h>
 #include <linux/miscdevice.h>
 #include <linux/etherdevice.h>
 
@@ -16,6 +16,21 @@
 
 #define NH_MINOR 214
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,19)
+
+#define HARD_TX_LOCK(dev, cpu) {                        \
+	if ((dev->features & NETIF_F_LLTX) == 0) {      \
+		netif_tx_lock(dev);                     \
+	}                                               \
+}
+
+#define HARD_TX_UNLOCK(dev) {                           \
+	if ((dev->features & NETIF_F_LLTX) == 0) {      \
+		netif_tx_unlock(dev);                   \
+	}                                               \
+}
+
+#endif
 
 static LIST_HEAD(current_skbs);
 static DEFINE_SPINLOCK(skb_list_lock);
@@ -296,7 +311,7 @@ static ssize_t nh_write(struct file *file, const char __user *buf, size_t count,
 		skb->dev = p->writer->dest_dev; /* needed for <= 2.6.18 */
 		skb->protocol = eth_type_trans(skb, p->writer->dest_dev);
 
-		ret = netif_rx(skb);
+		ret = netif_rx_ni(skb);
 	} else {
 		/* TO_INTERFACE */
 		skb->dev = p->writer->dest_dev;
@@ -314,7 +329,22 @@ static ssize_t nh_write(struct file *file, const char __user *buf, size_t count,
 #else
 		dev_hard_header(skb, skb->dev, be16_to_cpu(skb->protocol), NULL, skb->dev->dev_addr, skb->len);
 #endif
-		ret = skb->dev->hard_start_xmit(skb, skb->dev);
+
+		rcu_read_lock_bh();
+		HARD_TX_LOCK(skb->dev, cpu);
+
+		if (!netif_queue_stopped(skb->dev)
+#if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,18)
+		    && !netif_subqueue_stopped(skb->dev, skb)
+#endif
+		    ) {
+			ret = skb->dev->hard_start_xmit(skb, skb->dev);
+			if (!ret)
+				printk("dev_hard_start_xmit returned %d\n", ret);
+		}
+		HARD_TX_UNLOCK(skb->dev);
+		rcu_read_unlock_bh();
+
 	}
 
 

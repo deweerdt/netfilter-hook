@@ -239,6 +239,10 @@ static int nh_release(struct inode *inode, struct file *file)
 		write_lock_irq(&nh_privs_lock);
 		list_del(&p->list);
 		write_unlock_irq(&nh_privs_lock);
+		if (p->filter->in)
+			dev_put(p->filter->in);
+		if (p->filter->out)
+			dev_put(p->filter->out);
 		kfree(p->filter);
 	}
 	while (!skb_queue_empty(&p->skb_queue)) {

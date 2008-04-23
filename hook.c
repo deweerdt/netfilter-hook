@@ -260,6 +260,10 @@ static int nh_release(struct inode *inode, struct file *file)
 			dev_put(p->filter->out);
 		kfree(p->filter);
 	}
+	if (p->writer) {
+		if (p->writer->dest_dev)
+			dev_put(p->writer->dest_dev);
+	}
 	while (!skb_queue_empty(&p->skb_queue)) {
 		struct sk_buff *skb;
 		skb = skb_dequeue(&p->skb_queue);

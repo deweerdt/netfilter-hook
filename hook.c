@@ -291,7 +291,7 @@ static ssize_t nh_write(struct file *file, const char __user *buf, size_t count,
 
 	if (copy_from_user(skb_put(skb, count), buf, count)) {
 		kfree_skb(skb);
-		printk("nh_write: failed copy_from_user %d\n", count);
+		printk("nh_write: failed copy_from_user %ld\n", count);
 		return -EFAULT;
 	}
 
@@ -313,6 +313,7 @@ static ssize_t nh_write(struct file *file, const char __user *buf, size_t count,
 
 		ret = netif_rx_ni(skb);
 	} else {
+		int cpu;
 		/* TO_INTERFACE */
 		skb->dev = p->writer->dest_dev;
 		skb->protocol = be16_to_cpu(0x0800);
@@ -331,6 +332,9 @@ static ssize_t nh_write(struct file *file, const char __user *buf, size_t count,
 #endif
 
 		rcu_read_lock_bh();
+
+		cpu = smp_processor_id(); /* ok because BHs are off */
+
 		HARD_TX_LOCK(skb->dev, cpu);
 
 		if (!netif_queue_stopped(skb->dev)

@@ -260,10 +260,6 @@ static int nh_release(struct inode *inode, struct file *file)
 			dev_put(p->filter->out);
 		kfree(p->filter);
 	}
-	if (p->writer) {
-		if (p->writer->dest_dev)
-			dev_put(p->writer->dest_dev);
-	}
 	while (!skb_queue_empty(&p->skb_queue)) {
 		struct sk_buff *skb;
 		skb = skb_dequeue(&p->skb_queue);
@@ -318,7 +314,6 @@ static ssize_t nh_write(struct file *file, const char __user *buf, size_t count,
 		ret = netif_rx_ni(skb);
 	} else {
 		int cpu;
-		/* TO_INTERFACE */
 		skb->dev = p->writer->dest_dev;
 		skb->protocol = be16_to_cpu(0x0800);
 		skb_pull(skb, sizeof(struct ethhdr));
@@ -335,23 +330,31 @@ static ssize_t nh_write(struct file *file, const char __user *buf, size_t count,
 		dev_hard_header(skb, skb->dev, be16_to_cpu(skb->protocol), NULL, skb->dev->dev_addr, skb->len);
 #endif
 
-		rcu_read_lock_bh();
+		if (p->writer->mode == TO_INTERFACE) {
+			rcu_read_lock_bh();
 
-		cpu = smp_processor_id(); /* ok because BHs are off */
+			cpu = smp_processor_id(); /* ok because BHs are off */
 
-		HARD_TX_LOCK(skb->dev, cpu);
+			HARD_TX_LOCK(skb->dev, cpu);
 
-		if (!netif_queue_stopped(skb->dev)
+			if (!netif_queue_stopped(skb->dev)
 #if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,18)
-		    && !netif_subqueue_stopped(skb->dev, skb)
+					&& !netif_subqueue_stopped(skb->dev, skb)
 #endif
-		    ) {
-			ret = skb->dev->hard_start_xmit(skb, skb->dev);
-			if (!ret)
+			   ) {
+				ret = skb->dev->hard_start_xmit(skb, skb->dev);
+				if (ret)
+					printk("dev_hard_start_xmit returned %d\n", ret);
+			}
+			HARD_TX_UNLOCK(skb->dev);
+			rcu_read_unlock_bh();
+		} else if (p->writer->mode == TO_INTERFACE_QUEUE) {
+		        ret = dev_queue_xmit(skb);
+			if (ret)
 				printk("dev_hard_start_xmit returned %d\n", ret);
+		} else {
+			WARN_ON_ONCE(1);
 		}
-		HARD_TX_UNLOCK(skb->dev);
-		rcu_read_unlock_bh();
 
 	}
 

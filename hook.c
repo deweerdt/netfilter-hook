@@ -266,7 +266,11 @@ static int nh_release(struct inode *inode, struct file *file)
 		kfree_skb(skb);
 	}
 
-	kfree(p->writer);
+	if (p->writer) {
+		if (p->writer->dest_dev)
+			dev_put(p->writer->dest_dev);
+		kfree(p->writer);
+	}
 	kfree(p);
 	return 0;
 }
@@ -386,6 +390,7 @@ wait_skb:
 	if (!skb)
 		goto wait_skb;
 
+	/* FIXME: should this be done in the hook? */
 	/* Save the dest mac now, it will be lost otherwise */
 	if (skb->dst && skb->dst->neighbour) {
 		struct ethhdr *eth;

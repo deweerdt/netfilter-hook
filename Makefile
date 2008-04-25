@@ -1,6 +1,7 @@
 EXTRA_CFLAGS+=-g -O0 -Wall
 MODULE_NAME = hk
 ${MODULE_NAME}-objs := hook.o
+CC=cgcc
 
 ifneq ($(KERNELRELEASE),)
 

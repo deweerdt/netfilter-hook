@@ -181,7 +181,7 @@ static unsigned int nf_cb(
 #define NET_NAMESPACE &init_net,
 #endif
 
-int setup_filter(struct nh_private *p)
+static int setup_filter(struct nh_private *p)
 {
 	struct nh_filter *f = p->filter;
 	struct nf_hook_ops *nf_hook;
@@ -295,7 +295,7 @@ static ssize_t nh_write(struct file *file, const char __user *buf, size_t count,
 
 	if (copy_from_user(skb_put(skb, count), buf, count)) {
 		kfree_skb(skb);
-		printk("nh_write: failed copy_from_user %ld\n", count);
+		printk("nh_write: failed copy_from_user %d\n", count);
 		return -EFAULT;
 	}
 
@@ -335,15 +335,15 @@ static ssize_t nh_write(struct file *file, const char __user *buf, size_t count,
 #endif
 
 		if (p->writer->mode == TO_INTERFACE) {
-			rcu_read_lock_bh();
-
 			cpu = smp_processor_id(); /* ok because BHs are off */
+
+			rcu_read_lock_bh();
 
 			HARD_TX_LOCK(skb->dev, cpu);
 
 			if (!netif_queue_stopped(skb->dev)
 #if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,18)
-					&& !netif_subqueue_stopped(skb->dev, skb)
+			    && !netif_subqueue_stopped(skb->dev, skb)
 #endif
 			   ) {
 				ret = skb->dev->hard_start_xmit(skb, skb->dev);
@@ -351,7 +351,9 @@ static ssize_t nh_write(struct file *file, const char __user *buf, size_t count,
 					printk("dev_hard_start_xmit returned %d\n", ret);
 			}
 			HARD_TX_UNLOCK(skb->dev);
+
 			rcu_read_unlock_bh();
+
 		} else if (p->writer->mode == TO_INTERFACE_QUEUE) {
 		        ret = dev_queue_xmit(skb);
 			if (ret)
@@ -433,7 +435,7 @@ static int nh_ioctl(struct inode *inode, struct file *file,
 		if (!filter)
 			return -ENOMEM;
 
-		if (copy_from_user(filter, (void *)pointer, sizeof(*filter))) {
+		if (copy_from_user(filter, (void __user*)pointer, sizeof(*filter))) {
 			return -EFAULT;
 		}
 
@@ -479,7 +481,7 @@ static int nh_ioctl(struct inode *inode, struct file *file,
 		if (!writer)
 			return -ENOMEM;
 
-		if (copy_from_user(writer, (void *)pointer, sizeof(*writer)))
+		if (copy_from_user(writer, (void __user *)pointer, sizeof(*writer)))
 			return -EFAULT;
 
 		p->writer = writer;

@@ -8,8 +8,9 @@ enum {
 };
 
 enum {
-	TO_INTERFACE = (1 << 0),
-	TO_ROUTING_STACK = (1 << 1),
+	TO_INTERFACE 		= (1 << 0),
+	TO_INTERFACE_QUEUE 	= (1 << 1),
+	TO_ROUTING_STACK 	= (1 << 2),
 };
 
 struct nh_writer {

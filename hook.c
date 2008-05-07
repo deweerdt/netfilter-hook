@@ -181,7 +181,7 @@ static unsigned int nf_cb(
 #define NET_NAMESPACE &init_net,
 #endif
 
-int setup_filter(struct nh_private *p)
+static int setup_filter(struct nh_private *p)
 {
 	struct nh_filter *f = p->filter;
 	struct nf_hook_ops *nf_hook;
@@ -260,17 +260,17 @@ static int nh_release(struct inode *inode, struct file *file)
 			dev_put(p->filter->out);
 		kfree(p->filter);
 	}
-	if (p->writer) {
-		if (p->writer->dest_dev)
-			dev_put(p->writer->dest_dev);
-	}
 	while (!skb_queue_empty(&p->skb_queue)) {
 		struct sk_buff *skb;
 		skb = skb_dequeue(&p->skb_queue);
 		kfree_skb(skb);
 	}
 
-	kfree(p->writer);
+	if (p->writer) {
+		if (p->writer->dest_dev)
+			dev_put(p->writer->dest_dev);
+		kfree(p->writer);
+	}
 	kfree(p);
 	return 0;
 }
@@ -336,14 +336,13 @@ static ssize_t nh_write(struct file *file, const char __user *buf, size_t count,
 
 		if (p->writer->mode == TO_INTERFACE) {
 			rcu_read_lock_bh();
-
 			cpu = smp_processor_id(); /* ok because BHs are off */
 
 			HARD_TX_LOCK(skb->dev, cpu);
 
 			if (!netif_queue_stopped(skb->dev)
 #if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,18)
-					&& !netif_subqueue_stopped(skb->dev, skb)
+			    && !netif_subqueue_stopped(skb->dev, skb)
 #endif
 			   ) {
 				ret = skb->dev->hard_start_xmit(skb, skb->dev);
@@ -351,7 +350,9 @@ static ssize_t nh_write(struct file *file, const char __user *buf, size_t count,
 					printk("dev_hard_start_xmit returned %d\n", ret);
 			}
 			HARD_TX_UNLOCK(skb->dev);
+
 			rcu_read_unlock_bh();
+
 		} else if (p->writer->mode == TO_INTERFACE_QUEUE) {
 		        ret = dev_queue_xmit(skb);
 			if (ret)
@@ -390,6 +391,7 @@ wait_skb:
 	if (!skb)
 		goto wait_skb;
 
+	/* FIXME: should this be done in the hook? */
 	/* Save the dest mac now, it will be lost otherwise */
 	if (skb->dst && skb->dst->neighbour) {
 		struct ethhdr *eth;
@@ -432,7 +434,7 @@ static int nh_ioctl(struct inode *inode, struct file *file,
 		if (!filter)
 			return -ENOMEM;
 
-		if (copy_from_user(filter, (void *)pointer, sizeof(*filter))) {
+		if (copy_from_user(filter, (void __user*)pointer, sizeof(*filter))) {
 			return -EFAULT;
 		}
 
@@ -478,7 +480,7 @@ static int nh_ioctl(struct inode *inode, struct file *file,
 		if (!writer)
 			return -ENOMEM;
 
-		if (copy_from_user(writer, (void *)pointer, sizeof(*writer)))
+		if (copy_from_user(writer, (void __user *)pointer, sizeof(*writer)))
 			return -EFAULT;
 
 		p->writer = writer;

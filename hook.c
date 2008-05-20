@@ -1,10 +1,10 @@
 #include <linux/fs.h>
 #include <linux/ip.h>
 #include <linux/tcp.h>
+#include <linux/wait.h>
 #include <linux/module.h>
 #include <linux/version.h>
 #include <linux/netfilter.h>
-#include <linux/completion.h>
 #include <linux/netfilter_ipv4.h>
 #include <linux/netdevice.h>
 #include <linux/miscdevice.h>
@@ -16,28 +16,22 @@
 
 #define NH_MINOR 214
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,19)
-
-#define HARD_TX_LOCK(dev, cpu) {                        \
-	if ((dev->features & NETIF_F_LLTX) == 0) {      \
-		netif_tx_lock(dev);                     \
-	}                                               \
-}
-
-#define HARD_TX_UNLOCK(dev) {                           \
-	if ((dev->features & NETIF_F_LLTX) == 0) {      \
-		netif_tx_unlock(dev);                   \
-	}                                               \
-}
-
-#endif
-
 static LIST_HEAD(current_skbs);
 static DEFINE_SPINLOCK(skb_list_lock);
 struct skb_entry {
 	struct list_head list;
 	struct sk_buff *skb;
 };
+
+static unsigned int list_size(struct list_head *head)
+{
+	unsigned int count = 0;
+	struct list_head *pos;
+	list_for_each(pos, head)
+		count++;
+	return count;
+}
+
 
 /*
  * Must hold skb_list_lock
@@ -46,6 +40,7 @@ static struct skb_entry *is_hooked(struct sk_buff *skb)
 {
 	struct skb_entry *e;
 	int found = 0;
+
 	list_for_each_entry(e, &current_skbs, list) {
 		if(e->skb == skb) {
 			found = 1;
@@ -57,15 +52,14 @@ static struct skb_entry *is_hooked(struct sk_buff *skb)
 }
 
 static LIST_HEAD(nh_privs);
-static DEFINE_RWLOCK(nh_privs_lock);
+static DEFINE_SPINLOCK(nh_privs_lock);
 
 struct nh_private {
 	struct list_head list;
 	struct nh_filter *filter;
 	struct nh_writer *writer;
-	struct completion completion;
 	struct sk_buff_head skb_queue ;
-
+	wait_queue_head_t wq;
 };
 
 static struct nf_hook_ops *cb_in_use[NF_IP_NUMHOOKS + 1];
@@ -81,7 +75,7 @@ enum {
 };
 
 /*
- * Must held the nh_privs_lock
+ * Must hold the nh_privs_lock
  */
 static struct nh_private *pass(struct sk_buff *skb,
 				 const struct net_device *in,
@@ -147,30 +141,32 @@ static unsigned int nf_cb(
 {
 	struct nh_private *p;
 	struct skb_entry *e;
+	unsigned long flags;
 #if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,23)
 	struct sk_buff **pskb = &skb;
 #endif
 
 	/* if the packet was hooked once, don't send it back to user space */
-	spin_lock_irq(&skb_list_lock);
+	spin_lock_irqsave(&skb_list_lock, flags);
 	e = is_hooked(*pskb);
 	if (e) {
 		list_del(&e->list);
-		spin_unlock_irq(&skb_list_lock);
+		spin_unlock_irqrestore(&skb_list_lock, flags);
 		kfree(e);
 		return NF_ACCEPT;
 	}
-	spin_unlock_irq(&skb_list_lock);
+	spin_unlock_irqrestore(&skb_list_lock, flags);
 
-	read_lock_irq(&nh_privs_lock);
+	spin_lock_irqsave(&nh_privs_lock, flags);
 	p = pass(*pskb, in, out, hooknum);
 	if (p) {
 		skb_queue_tail(&p->skb_queue, *pskb);
-		complete(&p->completion);
-		read_unlock_irq(&nh_privs_lock);
+		spin_unlock_irqrestore(&nh_privs_lock, flags);
+
+		wake_up_interruptible(&p->wq);
 		return NF_STOLEN;
 	}
-	read_unlock_irq(&nh_privs_lock);
+	spin_unlock_irqrestore(&nh_privs_lock, flags);
 	return NF_ACCEPT;
 }
 
@@ -240,8 +236,9 @@ static int nh_open(struct inode *inode, struct file *file)
 	if (!p)
 		return -ENOMEM;
 
+	init_waitqueue_head(&p->wq);
 	skb_queue_head_init(&p->skb_queue);
-	init_completion(&p->completion);
+
 	file->private_data = p;
 
 	return 0;
@@ -249,11 +246,12 @@ static int nh_open(struct inode *inode, struct file *file)
 static int nh_release(struct inode *inode, struct file *file)
 {
 	struct nh_private *p = file->private_data;
+	unsigned long flags;
+
+	spin_lock_irqsave(&nh_privs_lock, flags);
 
 	if (p->filter) {
-		write_lock_irq(&nh_privs_lock);
 		list_del(&p->list);
-		write_unlock_irq(&nh_privs_lock);
 		if (p->filter->in)
 			dev_put(p->filter->in);
 		if (p->filter->out)
@@ -271,6 +269,9 @@ static int nh_release(struct inode *inode, struct file *file)
 			dev_put(p->writer->dest_dev);
 		kfree(p->writer);
 	}
+
+	spin_unlock_irqrestore(&nh_privs_lock, flags);
+
 	kfree(p);
 	return 0;
 }
@@ -280,6 +281,7 @@ static ssize_t nh_write(struct file *file, const char __user *buf, size_t count,
 	struct nh_private *p;
 	struct sk_buff *skb;
 	int ret;
+	unsigned long flags;
 
 	p = file->private_data;
 
@@ -308,16 +310,17 @@ static ssize_t nh_write(struct file *file, const char __user *buf, size_t count,
 		}
 		e->skb = skb;
 
-		spin_lock_irq(&skb_list_lock);
+		/* mark this skb as 'ours' */
+		spin_lock_irqsave(&skb_list_lock, flags);
 		list_add(&e->list, &current_skbs);
-		spin_unlock_irq(&skb_list_lock);
+		spin_unlock_irqrestore(&skb_list_lock, flags);
 
 		skb->dev = p->writer->dest_dev; /* needed for <= 2.6.18 */
 		skb->protocol = eth_type_trans(skb, p->writer->dest_dev);
 
 		ret = netif_rx_ni(skb);
 	} else {
-		int cpu;
+
 		skb->dev = p->writer->dest_dev;
 		skb->protocol = be16_to_cpu(0x0800);
 		skb_pull(skb, sizeof(struct ethhdr));
@@ -334,11 +337,12 @@ static ssize_t nh_write(struct file *file, const char __user *buf, size_t count,
 		dev_hard_header(skb, skb->dev, be16_to_cpu(skb->protocol), NULL, skb->dev->dev_addr, skb->len);
 #endif
 
-		if (p->writer->mode == TO_INTERFACE) {
-			rcu_read_lock_bh();
-			cpu = smp_processor_id(); /* ok because BHs are off */
+		switch (p->writer->mode) {
+		case TO_INTERFACE:
+			struct net_device *dev = skb->dev;
 
-			HARD_TX_LOCK(skb->dev, cpu);
+			spin_lock_irqsave(&dev->_xmit_lock, flags);
+			dev->xmit_lock_owner = smp_processor_id();
 
 			if (!netif_queue_stopped(skb->dev)
 #if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,18)
@@ -346,21 +350,18 @@ static ssize_t nh_write(struct file *file, const char __user *buf, size_t count,
 #endif
 			   ) {
 				ret = skb->dev->hard_start_xmit(skb, skb->dev);
-				if (ret)
-					printk("dev_hard_start_xmit returned %d\n", ret);
 			}
-			HARD_TX_UNLOCK(skb->dev);
 
-			rcu_read_unlock_bh();
+			dev->xmit_lock_owner = -1;
+			spin_unlock_irqrestore(&dev->_xmit_lock, flags);
 
-		} else if (p->writer->mode == TO_INTERFACE_QUEUE) {
+			break;
+		case TO_INTERFACE_QUEUE:
 		        ret = dev_queue_xmit(skb);
-			if (ret)
-				printk("dev_hard_start_xmit returned %d\n", ret);
-		} else {
+			break;
+		default:
 			WARN_ON_ONCE(1);
 		}
-
 	}
 
 
@@ -372,6 +373,7 @@ static ssize_t nh_read(struct file *file, char __user *buf, size_t count, loff_t
 	struct nh_private *p;
 	struct sk_buff *skb;
 	int ret;
+	unsigned long flags;
 
 	if (!count)
 		return count;
@@ -383,14 +385,18 @@ static ssize_t nh_read(struct file *file, char __user *buf, size_t count, loff_t
 	}
 
 wait_skb:
-	if(skb_queue_empty(&p->skb_queue))
-		if (wait_for_completion_interruptible(&p->completion))
-			return -ERESTARTSYS;
+	wait_event_interruptible(p->wq, !(skb_queue_empty(&p->skb_queue)));
+	if (signal_pending(current))
+		return -ERESTARTSYS;
 
+	spin_lock_irqsave(&nh_privs_lock, flags);
 	skb = skb_dequeue(&p->skb_queue);
+	spin_unlock_irqrestore(&nh_privs_lock, flags);
+
 	if (!skb)
 		goto wait_skb;
 
+#if 0
 	/* FIXME: should this be done in the hook? */
 	/* Save the dest mac now, it will be lost otherwise */
 	if (skb->dst && skb->dst->neighbour) {
@@ -400,6 +406,7 @@ wait_skb:
 		skb_pull(skb, sizeof(struct ethhdr));
 		memcpy(eth->h_dest, skb->dst->neighbour->ha, ETH_ALEN);
 	}
+#endif
 	skb_push(skb, ETH_HLEN);
 
 	if (skb->len > count) {
@@ -413,6 +420,7 @@ wait_skb:
 		kfree_skb(skb);
 		return -EFAULT;
 	}
+
 	kfree_skb(skb);
 
 	return ret;
@@ -425,6 +433,7 @@ static int nh_ioctl(struct inode *inode, struct file *file,
 	struct nh_filter *filter;
 	struct nh_writer *writer;
 	int ret;
+	unsigned long flags;
 
 	p = file->private_data;
 
@@ -458,9 +467,9 @@ static int nh_ioctl(struct inode *inode, struct file *file,
 #endif
 
 		if (!ret) {
-			write_lock_irq(&nh_privs_lock);
+			spin_lock_irqsave(&nh_privs_lock, flags);
 			list_add(&p->list, &nh_privs);
-			write_unlock_irq(&nh_privs_lock);
+			spin_unlock_irqrestore(&nh_privs_lock, flags);
 		} else {
 			kfree(p->filter);
 		}
@@ -469,9 +478,9 @@ static int nh_ioctl(struct inode *inode, struct file *file,
 		return ret;
 	case NH_RM_FILTER:
 		if (p->filter) {
-			write_lock_irq(&nh_privs_lock);
+			spin_lock_irqsave(&nh_privs_lock, flags);
 			list_del(&p->list);
-			write_unlock_irq(&nh_privs_lock);
+			spin_unlock_irqrestore(&nh_privs_lock, flags);
 			kfree(p->filter);
 		}
 		return 0;

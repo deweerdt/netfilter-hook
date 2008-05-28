@@ -1,0 +1,20 @@
+Source: nfhook
+Section: unknown
+Priority: optional
+Maintainer: Olivier BONHOMME <Olivier BONHOMME <obonhomme@nerim.net>>
+Build-Depends: debhelper (>= 5)
+Standards-Version: 3.7.2
+
+Package: nfhook-modules-_KVERS_
+Architecture: any
+Provides: nfhook-modules
+Description: nfhook modules for Linux (kernel _KVERS_).
+ This package contains the set of loadable kernel modules for the
+ <description>.
+ .
+ This package contains the compiled kernel modules for _KVERS_
+ .
+ If you have compiled your own kernel, you will most likely need to build
+ your own nfhook-modules. The nfhook-source package has been
+ provided for use with the Debian's module-assistant or kernel-package
+ utilities to produce a version of nfhook-modules for your kernel.

@@ -1,0 +1,23 @@
+nfhook for Debian
+-----------------
+
+Please see ./README for a description of the nfhook software.
+
+The Debian nfhook source package provides two packages,
+
+ 1) nfhook, which the provides the userspace daemon
+ 2) nfhook-source, which provides the source for the kernel modules
+
+The nfhook-source package can be used in several ways,
+
+ - Using the make-kpkg(1) command provided by the kernel-package Debian
+   package. This will produce a corresponding nfhook-modules package for
+   the Debian kernel-image package that you are using. This is "the Debian
+   way". See the "modules_image" section of the make-kpkg(1) man page.
+
+ - Changing to the /usr/src/modules/nfhook/ directory and building as
+   the README file instructs using "make; make install". This will build
+   and install a module specific to the system you are building on and is
+   not under control of the packaging system.
+
+ -- Olivier BONHOMME <Olivier BONHOMME <obonhomme@nerim.net>>  Fri, 23 May 2008 15:21:20 +0200

@@ -1,0 +1,6 @@
+nfhook (0.1-1) unstable; urgency=low
+
+  * Initial release (Closes: #nnnn)  <nnnn is the bug number of your ITP>
+
+ -- Olivier BONHOMME <Olivier BONHOMME <obonhomme@nerim.net>>  Fri, 23 May 2008 15:21:20 +0200
+

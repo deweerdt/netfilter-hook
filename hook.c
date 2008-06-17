@@ -1,15 +1,14 @@
+#include <linux/etherdevice.h>
 #include <linux/fs.h>
 #include <linux/ip.h>
-#include <linux/tcp.h>
-#include <linux/wait.h>
+#include <linux/miscdevice.h>
 #include <linux/module.h>
-#include <linux/version.h>
+#include <linux/netdevice.h>
 #include <linux/netfilter.h>
 #include <linux/netfilter_ipv4.h>
-#include <linux/netdevice.h>
-#include <linux/miscdevice.h>
-#include <linux/etherdevice.h>
-
+#include <linux/tcp.h>
+#include <linux/version.h>
+#include <linux/wait.h>
 #include <asm/uaccess.h>
 
 #include "hook.h"
@@ -23,6 +22,7 @@ struct skb_entry {
 	struct sk_buff *skb;
 };
 
+#if defined(__DEBUG__)
 static unsigned int list_size(struct list_head *head)
 {
 	unsigned int count = 0;
@@ -31,6 +31,7 @@ static unsigned int list_size(struct list_head *head)
 		count++;
 	return count;
 }
+#endif
 
 
 /*
@@ -320,6 +321,7 @@ static ssize_t nh_write(struct file *file, const char __user *buf, size_t count,
 
 		ret = netif_rx_ni(skb);
 	} else {
+		struct net_device *dev;
 
 		skb->dev = p->writer->dest_dev;
 		skb->protocol = be16_to_cpu(0x0800);
@@ -339,7 +341,7 @@ static ssize_t nh_write(struct file *file, const char __user *buf, size_t count,
 
 		switch (p->writer->mode) {
 		case TO_INTERFACE:
-			struct net_device *dev = skb->dev;
+			dev = skb->dev;
 
 			spin_lock_irqsave(&dev->_xmit_lock, flags);
 			dev->xmit_lock_owner = smp_processor_id();
@@ -396,17 +398,16 @@ wait_skb:
 	if (!skb)
 		goto wait_skb;
 
-#if 0
-	/* FIXME: should this be done in the hook? */
 	/* Save the dest mac now, it will be lost otherwise */
 	if (skb->dst && skb->dst->neighbour) {
 		struct ethhdr *eth;
+
 		skb_push(skb, sizeof(struct ethhdr));
 		eth = (struct ethhdr *)skb->data;
 		skb_pull(skb, sizeof(struct ethhdr));
 		memcpy(eth->h_dest, skb->dst->neighbour->ha, ETH_ALEN);
 	}
-#endif
+
 	skb_push(skb, ETH_HLEN);
 
 	if (skb->len > count) {

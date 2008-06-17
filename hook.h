@@ -2,9 +2,9 @@
 #define __HOOK_H__
 
 enum {
-	NH_SET_FILTER = 1,
-	NH_RM_FILTER = 2,
-	NH_SET_WRITE_MODE = 3,
+	NH_SET_FILTER 		= 1,
+	NH_RM_FILTER 		= 2,
+	NH_SET_WRITE_MODE 	= 3,
 };
 
 enum {
